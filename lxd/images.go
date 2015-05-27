@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -77,14 +78,82 @@ type imageMetadata struct {
 	Templates     map[string]*TemplateEntry
 }
 
+func untarImage(imagefname string, destpath string) (*imageMetadata, error) {
+	compression, _, err := detectCompression(imagefname)
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{"-C", destpath, "--numeric-owner"}
+	switch compression {
+	case COMPRESSION_TAR:
+		args = append(args, "-xf")
+	case COMPRESSION_GZIP:
+		args = append(args, "-zxf")
+	case COMPRESSION_BZ2:
+		args = append(args, "--jxf")
+	case COMPRESSION_LZMA:
+		args = append(args, "--lzma", "-xf")
+	default:
+		args = append(args, "-Jxf")
+	}
+	args = append(args, imagefname)
+
+	output, err := exec.Command("tar", args...).CombinedOutput()
+	if err != nil {
+		shared.Debugf("image unpacking failed\n")
+		shared.Debugf(string(output))
+		return nil, err
+	}
+
+	metadata := new(imageMetadata)
+	metadataFilename := filepath.Join(destpath, "metadata.yaml")
+	yamldata, err := ioutil.ReadFile(metadataFilename)
+	if err != nil {
+		return nil, fmt.Errorf("Could not read image metadata at '%s': %v", metadataFilename, err)
+	}
+
+	err = yaml.Unmarshal(yamldata, &metadata)
+	if err != nil {
+		return nil, fmt.Errorf("Could not parse %s: %v", metadataFilename, err)
+	}
+
+	return metadata, nil
+}
+
 func imagesPost(d *Daemon, r *http.Request) Response {
 	backing_fs, err := shared.GetFilesystem(d.lxcpath)
+
 	if err != nil {
 		return InternalError(err)
 	}
 
+	vgname, vgnameIsSet, err := getServerConfigValue(d, "core.lvm_vg_name")
+	if err != nil {
+		return InternalError(fmt.Errorf("Error checking server config: %v", err))
+	}
+
 	cleanup := func(err error, fname string) Response {
-		if backing_fs == "btrfs" {
+
+		if vgnameIsSet {
+			shared.Debugf("Error cleanup: removing LV for '%s'", fname)
+			lvsymlink := fmt.Sprintf("%s.lvm", fname)
+			lvpath, err := os.Readlink(lvsymlink)
+			if err != nil {
+				err = fmt.Errorf("Error in cleanup after %v: Couldn't follow link '%s'", err, lvsymlink)
+			}
+
+			err = shared.LVMRemoveLV(vgname, filepath.Base(lvpath))
+			if err != nil {
+				err = fmt.Errorf("Error in cleanup after %v: Couldn't remove '%s'", err, lvpath)
+			}
+
+			err = os.Remove(lvsymlink)
+			if err != nil {
+				err = fmt.Errorf("Error in cleanup after %v: Couldn't remove symlink '%s'", err, lvsymlink)
+			}
+
+		} else if backing_fs == "btrfs" {
 			subvol := fmt.Sprintf("%s.btrfs", fname)
 			if shared.PathExists(subvol) {
 				exec.Command("btrfs", "subvolume", "delete", subvol).Run()
@@ -138,7 +207,99 @@ func imagesPost(d *Daemon, r *http.Request) Response {
 		return cleanup(err, fname)
 	}
 
-	if backing_fs == "btrfs" {
+	var imageMeta *imageMetadata
+
+	if vgnameIsSet {
+		poolname, poolnameIsSet, err := getServerConfigValue(d, "core.lvm_thinpool_name")
+		if !poolnameIsSet {
+
+			poolname, err = shared.LVMCreateDefaultThinPool(vgname)
+			if err != nil {
+				return cleanup(fmt.Errorf("Error creating LVM thin pool: %v", err), imagefname)
+			}
+			err = setLVMThinPoolNameConfig(d, poolname)
+			if err != nil {
+				shared.Debugf("Error setting thin pool name: '%s'", err)
+				return cleanup(fmt.Errorf("Error setting LVM thin pool config: %v", err), imagefname)
+			}
+		}
+
+		lvpath, err := shared.LVMCreateThinLV(fingerprint, poolname, vgname)
+		if err != nil {
+			shared.Logf("Error from LVMCreateThinLV: '%v'", err)
+			return cleanup(fmt.Errorf("Error Creating LVM LV for new image: %v", err), imagefname)
+		}
+
+		err = os.Symlink(lvpath, fmt.Sprintf("%s.lvm", imagefname))
+		if err != nil {
+			return cleanup(err, imagefname)
+		}
+
+		output, err := exec.Command("mkfs.ext4", "-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", lvpath).CombinedOutput()
+		if err != nil {
+			shared.Logf("Error output from mkfs.ext4: '%s'", output)
+			return cleanup(fmt.Errorf("Error making filesystem on image LV: %v", err), imagefname)
+		}
+
+		tempLVMountPoint, err := ioutil.TempDir("", "LXD_import")
+		if err != nil {
+			return cleanup(err, imagefname)
+		}
+
+		removeTempMountPoint := func(inError error) error {
+			remove_err := os.RemoveAll(tempLVMountPoint)
+			if remove_err != nil {
+				if inError == nil {
+					return remove_err
+				} else {
+					return fmt.Errorf("Error removing temp mount point '%s' during cleanup of error %v", tempLVMountPoint, inError)
+				}
+			}
+			return inError
+		}
+
+		output, err = exec.Command("mount", "-o", "discard,stripe=1", lvpath, tempLVMountPoint).CombinedOutput()
+		if err != nil {
+			shared.Logf("Error output mounting image LV for untarring: '%s'", output)
+			err = removeTempMountPoint(err)
+			return cleanup(fmt.Errorf("Error mounting image LV: %v", err), imagefname)
+
+		}
+
+		unmountLV := func(inError error) error {
+			output, err = exec.Command("umount", tempLVMountPoint).CombinedOutput()
+			if err != nil {
+				if inError == nil {
+					return err
+				} else {
+					return fmt.Errorf("Error unmounting '%s' during cleanup of error %v", tempLVMountPoint, inError)
+				}
+			}
+			return inError
+		}
+
+		imageMeta, err = untarImage(imagefname, tempLVMountPoint)
+		if err != nil {
+			err = unmountLV(err)
+			err = removeTempMountPoint(err)
+			return cleanup(err, imagefname)
+		}
+
+		err = unmountLV(nil)
+		if err != nil {
+			shared.Logf("WARNING: could not unmount LV '%s' from '%s'. Will not remove. Error: %v", lvpath, tempLVMountPoint, err)
+		} else {
+			err = removeTempMountPoint(nil)
+			if err != nil {
+				shared.Logf("WARNING: could not remove temp dir '%s'. Continuing. Error: %v", tempLVMountPoint, err)
+			}
+		}
+
+		if remErr := os.Remove(imagefname); remErr != nil {
+			shared.Logf("WARNING: could not remove temp image file '%s'. Continuing. Error: %v", imagefname, err)
+		}
+
+	} else if backing_fs == "btrfs" {
 		subvol := fmt.Sprintf("%s.btrfs", imagefname)
 		output, err := exec.Command("btrfs", "subvolume", "create", subvol).CombinedOutput()
 		if err != nil {
@@ -147,37 +308,17 @@ func imagesPost(d *Daemon, r *http.Request) Response {
 			return cleanup(err, imagefname)
 		}
 
-		compression, _, err := detectCompression(imagefname)
+		imageMeta, err = untarImage(imagefname, subvol)
 		if err != nil {
 			return cleanup(err, imagefname)
 		}
 
-		args := []string{"-C", subvol, "--numeric-owner"}
-		switch compression {
-		case COMPRESSION_TAR:
-			args = append(args, "-xf")
-		case COMPRESSION_GZIP:
-			args = append(args, "-zxf")
-		case COMPRESSION_BZ2:
-			args = append(args, "-jxf")
-		case COMPRESSION_LZMA:
-			args = append(args, "--lzma", "-xf")
-		default:
-			args = append(args, "-Jxf")
-		}
-		args = append(args, imagefname)
+	} else {
 
-		output, err = exec.Command("tar", args...).CombinedOutput()
+		imageMeta, err = getImageMetadata(imagefname)
 		if err != nil {
-			shared.Debugf("image unpacking failed\n")
-			shared.Debugf(string(output))
 			return cleanup(err, imagefname)
 		}
-	}
-
-	imageMeta, err := getImageMetadata(imagefname)
-	if err != nil {
-		return cleanup(err, imagefname)
 	}
 
 	arch, _ := shared.ArchitectureId(imageMeta.Architecture)
@@ -380,12 +521,31 @@ func imageDelete(d *Daemon, r *http.Request) Response {
 	}
 
 	fname := shared.VarPath("images", imgInfo.Fingerprint)
-	err = os.Remove(fname)
-	if err != nil {
-		shared.Debugf("Error deleting image file %s: %s\n", fname, err)
+	if shared.PathExists(fname) {
+		err = os.Remove(fname)
+		if err != nil {
+			shared.Debugf("Error deleting image file %s: %s\n", fname, err)
+		}
 	}
 
-	if backing_fs == "btrfs" {
+	vgname, vgnameIsSet, err := getServerConfigValue(d, "core.lvm_vg_name")
+	if err != nil {
+		return InternalError(fmt.Errorf("Error checking server config: %v", err))
+	}
+
+	if vgnameIsSet {
+		err = shared.LVMRemoveLV(vgname, imgInfo.Fingerprint)
+		if err != nil {
+			return InternalError(fmt.Errorf("Failed to remove deleted image LV: %v", err))
+		}
+
+		lvsymlink := fmt.Sprintf("%s.lvm", fname)
+		err = os.Remove(lvsymlink)
+		if err != nil {
+			return InternalError(fmt.Errorf("Failed to remove symlink to deleted image LV: '%s': %v", lvsymlink, err))
+		}
+
+	} else if backing_fs == "btrfs" {
 		subvol := fmt.Sprintf("%s.btrfs", fname)
 		exec.Command("btrfs", "subvolume", "delete", subvol).Run()
 	}

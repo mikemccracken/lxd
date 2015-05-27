@@ -78,6 +78,7 @@ cleanup() {
     set +x
 
     if [ -n "$LXD_INSPECT" ]; then
+        echo "To poke around, use:\n LXD_DIR=$LXD_DIR sudo -E $GOPATH/bin/lxc COMMAND --config ${LXD_CONF} "
         read -p "Tests Completed ($RESULT): hit enter to continue" x
     fi
     echo "==> Cleaning up"
@@ -132,6 +133,7 @@ fi
 . ./profiling.sh
 . ./fdleak.sh
 . ./database_update.sh
+. ./lvm.sh
 
 if [ -n "$LXD_DEBUG" ]; then
     debug=--debug
@@ -148,7 +150,7 @@ spawn_lxd() {
   shift
   shift
   echo "==> Spawning lxd on $addr in $lxddir"
-  LXD_DIR=$lxddir lxd $debug --tcp $addr $extraargs $* 2>&1 | tee $lxddir/lxd.log &
+  (LXD_DIR=$lxddir lxd $debug --tcp $addr $extraargs $* 2>&1 & echo $! > $lxddir/lxd.pid ) | tee $lxddir/lxd.log &
 
   echo "==> Confirming lxd on $addr is responsive"
   alive=0
@@ -225,6 +227,9 @@ fi
 
 echo "==> TEST: migration"
 test_migration
+
+echo "==> TEST: lvm backing"
+test_lvm
 
 curversion=`dpkg -s lxc | awk '/^Version/ { print $2 }'`
 if dpkg --compare-versions "$curversion" gt 1.1.2-0ubuntu3; then
