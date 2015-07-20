@@ -21,6 +21,7 @@ import (
 
 	"github.com/lxc/lxd"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/contrib"
 )
 
 // A Daemon can respond to requests from a shared client.
@@ -34,6 +35,7 @@ type Daemon struct {
 	clientCerts []x509.Certificate
 	db          *sql.DB
 	BackingFs   string
+	DeviceSet   *contrib.DeviceSet
 
 	localSockets  []net.Listener
 	remoteSockets []net.Listener

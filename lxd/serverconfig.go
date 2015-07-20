@@ -52,6 +52,8 @@ func ValidServerConfigKey(k string) bool {
 		return true
 	case "core.lvm_thinpool_name":
 		return true
+	case "core.dm_root":
+		return true
 	}
 
 	return false

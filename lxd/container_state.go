@@ -49,12 +49,22 @@ func activateStorage(d *Daemon, c *lxdContainer) error {
 		return fmt.Errorf("Error checking server config: %v", err)
 	}
 
+	_, dmrootIsSet, err := getServerConfigValue(d, "core.dm_root")
+	if err != nil {
+		return fmt.Errorf("Error checking server config: %v", err)
+	}
+
 	if vgnameIsSet {
 		lvpath := fmt.Sprintf("/dev/%s/%s", vgname, c.name)
 		output, err := exec.Command("mount", "-o", "discard", lvpath, cpath).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("Error mounting snapshot LV: %v\noutput:'%s'", err, output)
 		}
+	} else if dmrootIsSet {
+		if err = d.DeviceSet.MountDevice(c.name, cpath, ""); err != nil {
+			return fmt.Errorf("Error mounting device: %s", err)
+		}
+
 	}
 	return nil
 }

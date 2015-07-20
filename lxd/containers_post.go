@@ -186,6 +186,11 @@ func createFromImage(d *Daemon, req *containerPostReq) Response {
 		return InternalError(fmt.Errorf("Error checking server config: %v", err))
 	}
 
+	_, dmrootIsSet, err := getServerConfigValue(d, "core.dm_root")
+	if err != nil {
+		return InternalError(fmt.Errorf("Error checking server config: %v", err))
+	}
+
 	if vgnameIsSet && shared.PathExists(fmt.Sprintf("%s.lv", shared.VarPath("images", hash))) {
 		run = shared.OperationWrap(func() error {
 
@@ -218,6 +223,33 @@ func createFromImage(d *Daemon, req *containerPostReq) Response {
 			}
 
 			return nil
+		})
+
+	} else if dmrootIsSet /* TODO-MMCC: and symlink to device path exists?? */{
+		run = shared.OperationWrap(func () error {
+			if err = d.DeviceSet.AddDevice(name, hash); err != nil {
+				return err
+			}
+
+			destPath := shared.VarPath("lxc", name)
+			err = os.MkdirAll(destPath, 0700)
+			if err != nil {
+				return fmt.Errorf("Error creating container directory: %v", err)
+			}
+
+			if !c.isPrivileged() {
+				if err = d.DeviceSet.MountDevice(name, destPath, ""); err != nil {
+					return fmt.Errorf("Error mounting device: %s", err)
+				}
+
+				if err = shiftRootfs(c, c.name, d); err != nil {
+					return fmt.Errorf("Error in shiftRootfs: %v", err)
+				}
+				d.DeviceSet.UnmountDevice(c.name)
+			}
+
+			return nil
+
 		})
 
 	} else if backingFs == "btrfs" && shared.PathExists(fmt.Sprintf("%s.btrfs", shared.VarPath("images", hash))) {
