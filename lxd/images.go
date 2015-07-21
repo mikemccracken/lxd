@@ -443,7 +443,7 @@ func buildOtherFs(d *Daemon, builddir string, fp string) error {
 
 func createImageLV(d *Daemon, builddir string, fingerprint string, vgname string) error {
 	imagefname := filepath.Join(builddir, fingerprint)
-	poolname, poolnameIsSet, err := getServerConfigValue(d, "core.lvm_thinpool_name")
+	/*poolname, poolnameIsSet, err := getServerConfigValue(d, "core.lvm_thinpool_name")
 	if err != nil {
 		return fmt.Errorf("Error checking server config: %v", err)
 	}
@@ -459,8 +459,10 @@ func createImageLV(d *Daemon, builddir string, fingerprint string, vgname string
 			return fmt.Errorf("Error setting LVM thin pool config: %v", err)
 		}
 	}
+        */
 
-	lvpath, err := shared.LVMCreateThinLV(fingerprint, poolname, vgname)
+	//lvpath, err := shared.LVMCreateThinLV(fingerprint, poolname, vgname)
+	lvpath, err := shared.LVMCreateLV(fingerprint, vgname)
 	if err != nil {
 		shared.Logf("Error from LVMCreateThinLV: '%v'", err)
 		return fmt.Errorf("Error Creating LVM LV for new image: %v", err)

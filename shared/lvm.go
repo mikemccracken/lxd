@@ -63,8 +63,17 @@ func LVMCreateThinLV(lvname string, poolname string, vgname string) (string, err
 	return fmt.Sprintf("/dev/%s/%s", vgname, lvname), nil
 }
 
+func LVMCreateLV(lvname string, vgname string) (string, error) {
+	output, err := exec.Command("lvcreate", "-n", lvname, "--size", "2G", fmt.Sprintf("%s", vgname)).CombinedOutput()
+	if err != nil {
+		Debugf("could not create LV named '%s': '%s'", lvname, output)
+		return "", fmt.Errorf("Could not create LV named %s", lvname)
+	}
+	return fmt.Sprintf("/dev/%s/%s", vgname, lvname), nil
+}
+
 func LVMCreateSnapshotLV(lvname string, origlvname string, vgname string) (string, error) {
-	cmd := exec.Command("lvcreate", "-kn", "-n", lvname, "-s", fmt.Sprintf("/dev/%s/%s", vgname, origlvname))
+	cmd := exec.Command("lvcreate", "-kn", "-n", lvname, "--size", "2G", "-s", fmt.Sprintf("/dev/%s/%s", vgname, origlvname))
 
 	var errbuf bytes.Buffer
 	cmd.Stderr = &errbuf
@@ -86,7 +95,7 @@ func LVMCreateSnapshotLV(lvname string, origlvname string, vgname string) (strin
 	}
 
 	snapshotFullName := fmt.Sprintf("/dev/%s/%s", vgname, lvname)
-	output, err := exec.Command("lvchange", "-ay", snapshotFullName).CombinedOutput()
+	output, err := exec.Command("lvchange", "-y", "-ay", snapshotFullName).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("Could not activate new snapshot '%s': %v\noutput:%s", lvname, err, output)
 	}
