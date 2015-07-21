@@ -51,10 +51,12 @@ func activateStorage(d *Daemon, c *lxdContainer) error {
 
 	if vgnameIsSet {
 		lvpath := fmt.Sprintf("/dev/%s/%s", vgname, c.name)
+		mount_start := time.Now()
 		output, err := exec.Command("mount", "-o", "discard", lvpath, cpath).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("Error mounting snapshot LV: %v\noutput:'%s'", err, output)
 		}
+		shared.Debugf("%s: mount %s", c.name, time.Since(mount_start))
 	}
 	return nil
 }
@@ -84,9 +86,11 @@ func containerStatePut(d *Daemon, r *http.Request) Response {
 			if err = activateStorage(d, c); err != nil {
 				return err
 			}
+			start_start := time.Now()
 			if err = c.Start(); err != nil {
 				return err
 			}
+			shared.Debugf("%s: start %s", c.name, time.Since(start_start))
 			return nil
 		}
 	case shared.Stop:

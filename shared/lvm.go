@@ -69,12 +69,15 @@ func LVMCreateSnapshotLV(lvname string, origlvname string, vgname string) (strin
 	var errbuf bytes.Buffer
 	cmd.Stderr = &errbuf
 
+	start := time.Now()
 	err := cmd.Start()
 	if err != nil {
 		Debugf("could not create LV named '%s' as snapshot of '%s': '%s'", lvname, origlvname, errbuf.String())
 		return "", fmt.Errorf("Could not create snapshot LV named %s", lvname)
 	}
 	err = cmd.Wait()
+	Debugf("%s: lvcreate %s", lvname, time.Since(start))
+        
 
 	if err != nil {
 		return "", fmt.Errorf("Snapshot LV creation error: '%v'", err)
@@ -84,13 +87,13 @@ func LVMCreateSnapshotLV(lvname string, origlvname string, vgname string) (strin
 		Debugf("could not create LV named '%s' as snapshot of '%s': '%s'", lvname, origlvname, errbuf.String())
 		return "", fmt.Errorf("Could not create snapshot LV named %s", lvname)
 	}
-
+	lvchange_start := time.Now()
 	snapshotFullName := fmt.Sprintf("/dev/%s/%s", vgname, lvname)
 	output, err := exec.Command("lvchange", "-ay", snapshotFullName).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("Could not activate new snapshot '%s': %v\noutput:%s", lvname, err, output)
 	}
-
+	Debugf("%s: lvchange %s", lvname, time.Since(lvchange_start))
 	return snapshotFullName, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/dustinkirkland/golang-petname"
 	"github.com/gorilla/websocket"
@@ -195,20 +196,24 @@ func createFromImage(d *Daemon, req *containerPostReq) Response {
 			}
 
 			if !c.isPrivileged() {
+			        mount_start := time.Now()
 				output, err := exec.Command("mount", "-o", "discard", lvpath, destPath).CombinedOutput()
 				if err != nil {
 					return fmt.Errorf("Error mounting snapshot LV: %v\noutput:'%s'", err, output)
 				}
-
+				shared.Debugf("%s: mount %s", c.name, time.Since(mount_start))
+				shiftstart := time.Now()
 				if err = shiftRootfs(c, c.name, d); err != nil {
 					return fmt.Errorf("Error in shiftRootfs: %v", err)
 				}
-
+				shared.Debugf("%s: shift %s", c.name, time.Since(shiftstart))
+				umount_start := time.Now()
 				cpath := shared.VarPath("lxc", c.name)
 				output, err = exec.Command("umount", cpath).CombinedOutput()
 				if err != nil {
 					return fmt.Errorf("Error unmounting '%s' after shiftRootfs: %v", cpath, err)
 				}
+ 				shared.Debugf("%s: umount %s", c.name, time.Since(umount_start))
 			}
 
 			return nil
