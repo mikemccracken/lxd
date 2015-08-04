@@ -11,13 +11,15 @@ VERSION=$(shell grep "var Version" shared/flex.go | sed -r -e 's/.*"([0-9\.]*)"/
 ARCHIVE=lxd-$(VERSION).tar
 
 .PHONY: default
-default:
-	go get -v -d ./...
+default: get
 	go install -v ./...
 
-.PHONY: client
-client:
+.PHONY: get
+get:
 	go get -v -d ./...
+
+.PHONY: client
+client: get
 	go install -v ./lxc
 
 # This only needs to be done when migrate.proto is actually changed; since we
@@ -28,9 +30,11 @@ protobuf:
 	protoc --go_out=. ./lxd/migration/migrate.proto
 
 .PHONY: check
-check: default
-	go test ./...
-	cd test && ./main.sh
+check: get
+	go install -v -a -race ./...
+	go test -race ./...
+	-cd test && GORACE="halt_on_error=1 log_path=race-log" ./main.sh
+	go install -v -a ./...	# rebuild all without race detector
 
 gccgo:
 	go build -compiler gccgo ./...
