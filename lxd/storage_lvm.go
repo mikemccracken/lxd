@@ -91,6 +91,11 @@ func storageLVMSetVolumeGroupNameConfig(d *Daemon, vgname string) error {
 	return nil
 }
 
+func mungeContainerNameForLV(containerName string) string {
+	lvName := strings.Replace(containerName, "-", "--", -1)
+	return strings.Replace(lvName, shared.SnapshotDelimiter, "-", -1)
+}
+
 type storageLvm struct {
 	d      *Daemon
 	sType  storageType
@@ -146,7 +151,9 @@ func (s *storageLvm) ContainerCreateFromImage(
 		}
 	}
 
-	lvpath, err := s.createSnapshotLV(container.NameGet(), imageFingerprint)
+	containerName := mungeContainerNameForLV(container.NameGet())
+
+	lvpath, err := s.createSnapshotLV(containerName, imageFingerprint, false)
 	if err != nil {
 		return err
 	}
@@ -185,7 +192,8 @@ func (s *storageLvm) ContainerCreateFromImage(
 
 func (s *storageLvm) ContainerDelete(container container) error {
 	// First remove the LVM LV
-	if err := s.removeLV(container.NameGet()); err != nil {
+	lvName := mungeContainerNameForLV(container.NameGet())
+	if err := s.removeLV(lvName); err != nil {
 		return err
 	}
 
@@ -202,6 +210,7 @@ func (s *storageLvm) ContainerDelete(container container) error {
 		return fmt.Errorf("Cleaning up %s: %s", cPath, err)
 	}
 
+	// TODO-MMCC this should be in containersnapshot remove?
 	// If its name contains a "/" also remove the parent,
 	// this should only happen with snapshot containers
 	if strings.Contains(container.NameGet(), "/") {
@@ -227,9 +236,10 @@ func (s *storageLvm) ContainerCopy(container container, sourceContainer containe
 }
 
 func (s *storageLvm) ContainerStart(container container) error {
-	lvpath := fmt.Sprintf("/dev/%s/%s", s.vgName, container.NameGet())
+	lvName := mungeContainerNameForLV(container.NameGet())
+	lvPath := fmt.Sprintf("/dev/%s/%s", s.vgName, lvName)
 	output, err := exec.Command(
-		"mount", "-o", "discard", lvpath, container.PathGet("")).CombinedOutput()
+		"mount", "-o", "discard", lvPath, container.PathGet("")).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf(
 			"Error mounting snapshot LV path='%s': %v\noutput:'%s'",
@@ -275,9 +285,32 @@ func (s *storageLvm) ContainerRestore(
 func (s *storageLvm) ContainerSnapshotCreate(
 	snapshotContainer container, sourceContainer container) error {
 
-	return fmt.Errorf(
-		"ContainerSnapshotCreate is not implement in the LVM Backend.")
+	srcName := mungeContainerNameForLV(sourceContainer.NameGet())
+	destName := mungeContainerNameForLV(snapshotContainer.NameGet())
+	shared.Log.Debug(
+		"Creating snapshot",
+		log.Ctx{"srcName": srcName, "destName": destName})
+
+	lvpath, err := s.createSnapshotLV(destName, srcName, true)
+	if err != nil {
+		return fmt.Errorf("Error creating snapshot LV: %v", err)
+	}
+
+	destPath := snapshotContainer.PathGet("")
+	if err := os.MkdirAll(destPath, 0755); err != nil {
+		return fmt.Errorf("Error creating container directory: %v", err)
+	}
+
+	dest := fmt.Sprintf("%s.lv", snapshotContainer.PathGet(""))
+	shared.Log.Debug("ContainerSnapshotCreate: ", log.Ctx{"lvpath": lvpath, "dest": dest})
+	err = os.Symlink(lvpath, dest)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
+
 func (s *storageLvm) ContainerSnapshotDelete(
 	snapshotContainer container) error {
 
@@ -439,7 +472,7 @@ func (s *storageLvm) removeLV(lvname string) error {
 	return nil
 }
 
-func (s *storageLvm) createSnapshotLV(lvname string, origlvname string) (string, error) {
+func (s *storageLvm) createSnapshotLV(lvname string, origlvname string, readonly bool) (string, error) {
 	output, err := exec.Command(
 		"lvcreate",
 		"-kn",
@@ -452,7 +485,13 @@ func (s *storageLvm) createSnapshotLV(lvname string, origlvname string) (string,
 	}
 
 	snapshotFullName := fmt.Sprintf("/dev/%s/%s", s.vgName, lvname)
-	output, err = exec.Command("lvchange", "-ay", snapshotFullName).CombinedOutput()
+
+	if readonly {
+		output, err = exec.Command("lvchange", "-ay", "-pr", snapshotFullName).CombinedOutput()
+	} else {
+		output, err = exec.Command("lvchange", "-ay", snapshotFullName).CombinedOutput()
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("Could not activate new snapshot '%s': %v\noutput:%s", lvname, err, output)
 	}

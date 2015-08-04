@@ -208,7 +208,7 @@ func containerLXDCreateAsCopy(d *Daemon, name string,
 	}
 
 	// Now copy the source
-	sourceContainer.StorageStart()
+	sourceContainer.StorageStart() // TODO-MMCC do we need to do this? not for lvm
 	defer sourceContainer.StorageStop()
 
 	if err := c.Storage.ContainerCopy(c, sourceContainer); err != nil {
@@ -230,8 +230,6 @@ func containerLXDCreateAsSnapshot(d *Daemon, name string,
 	}
 
 	// Now copy the source
-	sourceContainer.StorageStart()
-	defer sourceContainer.StorageStop()
 
 	if err := c.Storage.ContainerSnapshotCreate(c, sourceContainer); err != nil {
 		c.Delete()
@@ -654,7 +652,7 @@ func (c *containerLXD) Restore(sourceContainer container) error {
 	// Restore the FS.
 	// TODO: I switched the FS and config restore, think thats the correct way
 	// (pcdummy)
-	sourceContainer.StorageStart()
+	sourceContainer.StorageStart() // TODO-MMCC not necessary
 	err := c.Storage.ContainerRestore(c, sourceContainer)
 	sourceContainer.StorageStop()
 
