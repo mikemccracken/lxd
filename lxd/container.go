@@ -230,7 +230,6 @@ func containerLXDCreateAsSnapshot(d *Daemon, name string,
 	args containerLXDArgs, sourceContainer container,
 	stateful bool) (container, error) {
 
-	// Create the container
 	c, err := containerLXDCreateInternal(d, name, args)
 	if err != nil {
 		return nil, err
@@ -766,9 +765,7 @@ func (c *containerLXD) Restore(sourceContainer container) error {
 	// Restore the FS.
 	// TODO: I switched the FS and config restore, think thats the correct way
 	// (pcdummy)
-	sourceContainer.StorageStart()
 	err := c.Storage.ContainerRestore(c, sourceContainer)
-	sourceContainer.StorageStop()
 
 	if err != nil {
 		shared.Log.Error("RESTORE => Restoring the filesystem failed",
