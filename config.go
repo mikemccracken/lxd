@@ -25,20 +25,22 @@ type Config struct {
 	// The implicit "local" remote is always available and communicates
 	// with the local daemon over a unix socket.
 	Remotes map[string]RemoteConfig `yaml:"remotes"`
-
-	// ListenAddr defines an alternative address for the local daemon
-	// to listen on. If empty, the daemon will listen only on the local
-	// unix socket address.
-	ListenAddr string `yaml:"listen-addr"`
 }
 
 // RemoteConfig holds details for communication with a remote daemon.
 type RemoteConfig struct {
-	Addr string `yaml:"addr"`
+	Addr   string `yaml:"addr"`
+	Public bool   `yaml:"public"`
 }
 
-var localRemote = RemoteConfig{Addr: "unix://" + shared.VarPath("unix.socket")}
+var localRemote = RemoteConfig{
+	Addr:   "unix://" + shared.VarPath("unix.socket"),
+	Public: false}
 var defaultRemote = map[string]RemoteConfig{"local": localRemote}
+
+var DefaultConfig = Config{
+	Remotes:       defaultRemote,
+	DefaultRemote: "local"}
 
 var ConfigDir = "$HOME/.config/lxc"
 var configFileName = "config.yml"
@@ -56,7 +58,7 @@ func LoadConfig() (*Config, error) {
 	data, err := ioutil.ReadFile(ConfigPath(configFileName))
 	if os.IsNotExist(err) {
 		// A missing file is equivalent to the default configuration.
-		return &Config{Remotes: defaultRemote}, nil
+		return &DefaultConfig, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot read config file: %v", err)
@@ -97,7 +99,7 @@ func SaveConfig(c *Config) error {
 	}
 
 	f.Close()
-	err = os.Rename(fname+".new", fname)
+	err = shared.FileMove(fname+".new", fname)
 	if err != nil {
 		return fmt.Errorf("cannot rename temporary config file: %v", err)
 	}

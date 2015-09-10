@@ -5,18 +5,19 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 	"github.com/olekukonko/tablewriter"
 	"golang.org/x/crypto/ssh/terminal"
 	"gopkg.in/yaml.v2"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type imageCmd struct{}
@@ -37,9 +38,9 @@ func (c *imageCmd) usage() string {
 	return gettext.Gettext(
 		"Manipulate container images\n" +
 			"\n" +
-			"lxc image import <tarball> [target] [--public] [--created-at=ISO-8601] [--expires-at=ISO-8601] [--fingerprint=FINGERPRINT] [prop=value]\n" +
+			"lxc image import <tarball> [rootfs tarball] [target] [--public] [--created-at=ISO-8601] [--expires-at=ISO-8601] [--fingerprint=FINGERPRINT] [prop=value]\n" +
 			"\n" +
-			"lxc image copy [remote:]<image> <remote>: [--alias=ALIAS].. [--copy-alias]\n" +
+			"lxc image copy [remote:]<image> <remote>: [--alias=ALIAS].. [--copy-alias] [--public]\n" +
 			"lxc image delete [remote:]<image>\n" +
 			"lxc image edit [remote:]<image>\n" +
 			"lxc image export [remote:]<image>\n" +
@@ -52,9 +53,12 @@ func (c *imageCmd) usage() string {
 			"\n" +
 			"lxc image alias create <alias> <target>\n" +
 			"lxc image alias delete <alias>\n" +
-			"lxc remote add images images.linuxcontainers.org\n" +
-			"lxc image alias list images:\n" +
-			"create, delete, list image aliases\n")
+			"lxc image alias list [remote:]\n" +
+			"\n" +
+			"Create, delete, list image aliases. Example:\n" +
+			"\n" +
+			"lxc remote add store2 images.linuxcontainers.org\n" +
+			"lxc image alias list store2:\n")
 }
 
 type aliasList []string
@@ -242,24 +246,31 @@ func (c *imageCmd) run(config *lxd.Config, args []string) error {
 		if len(args) < 2 {
 			return errArgs
 		}
-		imagefile := args[1]
 
+		var imageFile string
+		var rootfsFile string
 		var properties []string
-		if len(args) > 2 {
-			split := strings.Split(args[2], "=")
-			if len(split) == 1 {
-				remote, _ = config.ParseRemoteAndContainer(args[2])
-				if len(args) > 3 {
-					properties = args[3:]
+		var remote string
+
+		for _, arg := range args[1:] {
+			split := strings.Split(arg, "=")
+			if len(split) == 1 || shared.PathExists(arg) {
+				if strings.HasSuffix(arg, ":") {
+					remote = config.ParseRemote(arg)
 				} else {
-					properties = []string{}
+					if imageFile == "" {
+						imageFile = args[1]
+					} else {
+						rootfsFile = arg
+					}
 				}
 			} else {
-				properties = args[2:]
+				properties = append(properties, arg)
 			}
-		} else {
-			remote = ""
-			properties = []string{}
+		}
+
+		if imageFile == "" {
+			return errArgs
 		}
 
 		d, err := lxd.NewClient(config, remote)
@@ -267,7 +278,7 @@ func (c *imageCmd) run(config *lxd.Config, args []string) error {
 			return err
 		}
 
-		fingerprint, err := d.PostImage(imagefile, properties, publicImage, addAliases)
+		fingerprint, err := d.PostImage(imageFile, rootfsFile, properties, publicImage, addAliases)
 		if err != nil {
 			return err
 		}
@@ -357,7 +368,8 @@ func (c *imageCmd) run(config *lxd.Config, args []string) error {
 		defer os.Remove(fname)
 
 		for {
-			cmd := exec.Command(editor, fname)
+			cmdParts := strings.Fields(editor)
+			cmd := exec.Command(cmdParts[0], append(cmdParts[1:], fname)...)
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
@@ -447,14 +459,6 @@ func (c *imageCmd) run(config *lxd.Config, args []string) error {
 	}
 }
 
-func fromUrl(url string, prefix string) string {
-	offset := len(prefix)
-	if len(url) < offset+1 {
-		return ""
-	}
-	return url[offset:]
-}
-
 func dereferenceAlias(d *lxd.Client, inName string) string {
 	result := d.GetAlias(inName)
 	if result == "" {
@@ -507,11 +511,10 @@ func showImages(images []shared.ImageInfo) error {
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
+	table.SetColWidth(50)
 	table.SetHeader([]string{"ALIAS", "FINGERPRINT", "PUBLIC", "DESCRIPTION", "ARCH", "UPLOAD DATE"})
-
-	for _, v := range data {
-		table.Append(v)
-	}
+	sort.Sort(ByName(data))
+	table.AppendBulk(data)
 	table.Render()
 
 	return nil

@@ -11,13 +11,23 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
+	"io/ioutil"
 	"log"
 	"math/big"
 	"net"
 	"os"
+	"os/user"
 	"path"
 	"time"
 )
+
+// CertInfo is the representation of a Certificate in the API.
+type CertInfo struct {
+	Certificate string `json:"certificate"`
+	Fingerprint string `json:"fingerprint"`
+	Type        string `json:"type"`
+}
 
 /*
  * Generate a list of names for which the certificate will be valid.
@@ -37,7 +47,7 @@ func mynames() ([]string, error) {
 	}
 
 	for _, iface := range ifs {
-		if IsBridge(&iface) || IsLoopback(&iface) {
+		if IsLoopback(&iface) {
 			continue
 		}
 
@@ -55,29 +65,13 @@ func mynames() ([]string, error) {
 }
 
 func FindOrGenCert(certf string, keyf string) error {
-	_, err := os.Stat(certf)
-	_, err2 := os.Stat(keyf)
-
-	/*
-	 * If both stat's succeeded, then the cert and pubkey already
-	 * exist.
-	 */
-	if err == nil && err2 == nil {
+	if PathExists(certf) && PathExists(keyf) {
 		return nil
-	}
-
-	/* If one of the stats succeeded and one failed, then there's
-	 * a configuration problem, return an error */
-	if err == nil {
-		return err2
-	}
-	if err2 == nil {
-		return err
 	}
 
 	/* If neither stat succeeded, then this is our first run and we
 	 * need to generate cert and privkey */
-	err = GenCert(certf, keyf)
+	err := GenCert(certf, keyf)
 	if err != nil {
 		return err
 	}
@@ -120,10 +114,27 @@ func GenCert(certf string, keyf string) error {
 		return err
 	}
 
+	userEntry, err := user.Current()
+	var username string
+	if err == nil {
+		username = userEntry.Username
+		if username == "" {
+			username = "UNKNOWN"
+		}
+	} else {
+		username = "UNKNOWN"
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "UNKNOWN"
+	}
+
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{"linuxcontainers.org"},
+			CommonName:   fmt.Sprintf("%s@%s", username, hostname),
 		},
 		NotBefore: validFrom,
 		NotAfter:  validTo,
@@ -163,4 +174,14 @@ func GenCert(certf string, keyf string) error {
 	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privk)})
 	keyOut.Close()
 	return nil
+}
+
+func ReadCert(fpath string) (*x509.Certificate, error) {
+	cf, err := ioutil.ReadFile(fpath)
+	if err != nil {
+		return nil, err
+	}
+
+	certBlock, _ := pem.Decode(cf)
+	return x509.ParseCertificate(certBlock.Bytes)
 }

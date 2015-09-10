@@ -6,7 +6,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
 	"github.com/lxc/lxd/shared"
@@ -24,7 +24,7 @@ func (c *copyCmd) usage() string {
 	return gettext.Gettext(
 		"Copy containers within or in between lxd instances.\n" +
 			"\n" +
-			"lxc copy <source container> <destination container>\n")
+			"lxc copy [remote:]<source container> [remote:]<destination container>\n")
 }
 
 func (c *copyCmd) flags() {}
@@ -55,16 +55,12 @@ func copyContainer(config *lxd.Config, sourceResource string, destResource strin
 	baseImage := ""
 
 	if !shared.IsSnapshot(sourceName) {
-		status, err = source.ContainerStatus(sourceName, false)
+		status, err = source.ContainerStatus(sourceName)
 		if err != nil {
 			return err
 		}
 
-		baseImage = status.Config["volatile.baseImage"]
-
-		if status.State() == shared.RUNNING && sourceName != destName {
-			return fmt.Errorf(gettext.Gettext("Changing the name of a running container during copy isn't supported."))
-		}
+		baseImage = status.Config["volatile.base_image"]
 
 		if !keepVolatile {
 			for k := range status.Config {
@@ -88,10 +84,6 @@ func copyContainer(config *lxd.Config, sourceResource string, destResource strin
 
 		return source.WaitForSuccess(cp.Operation)
 	} else {
-		if sourceRemote == "" || destRemote == "" {
-			return fmt.Errorf(gettext.Gettext("non-http remotes are not supported for migration right now"))
-		}
-
 		dest, err := lxd.NewClient(config, destRemote)
 		if err != nil {
 			return err
@@ -107,35 +99,38 @@ func copyContainer(config *lxd.Config, sourceResource string, destResource strin
 			return fmt.Errorf(gettext.Gettext("not all the profiles from the source exist on the target"))
 		}
 
-		to, err := source.MigrateTo(sourceName)
+		sourceWSResponse, err := source.GetMigrationSourceWS(sourceName)
 		if err != nil {
 			return err
 		}
 
 		secrets := map[string]string{}
-		if err := json.Unmarshal(to.Metadata, &secrets); err != nil {
+		if err := json.Unmarshal(sourceWSResponse.Metadata, &secrets); err != nil {
 			return err
 		}
 
-		url := source.BaseWSURL + path.Join(to.Operation, "websocket")
-		migration, err := dest.MigrateFrom(sourceName, url, secrets, status.Config, status.Profiles, baseImage)
+		addresses, err := source.Addresses()
 		if err != nil {
 			return err
 		}
 
-		if err := dest.WaitForSuccess(migration.Operation); err != nil {
-			return err
-		}
+		for _, addr := range addresses {
+			sourceWSUrl := "wss://" + addr + path.Join(sourceWSResponse.Operation, "websocket")
 
-		if sourceName != destName {
-			rename, err := dest.Rename(sourceName, destName)
+			var migration *lxd.Response
+			migration, err = dest.MigrateFrom(destName, sourceWSUrl, secrets, status.Config, status.Profiles, baseImage)
 			if err != nil {
-				return err
+				continue
 			}
-			return dest.WaitForSuccess(rename.Operation)
+
+			if err = dest.WaitForSuccess(migration.Operation); err != nil {
+				continue
+			}
+
+			return nil
 		}
 
-		return nil
+		return err
 	}
 }
 

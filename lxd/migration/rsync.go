@@ -13,7 +13,6 @@ import (
 )
 
 func rsyncWebsocket(cmd *exec.Cmd, conn *websocket.Conn) error {
-
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -30,17 +29,6 @@ func rsyncWebsocket(cmd *exec.Cmd, conn *websocket.Conn) error {
 
 	shared.WebsocketMirror(conn, stdin, stdout)
 	return cmd.Wait()
-}
-
-// AddSlash adds a slash to the end of paths if they don't already have one.
-// This can be useful for rsyncing things, since rsync has behavior present on
-// the presence or absence of a trailing slash.
-func AddSlash(path string) string {
-	if path[len(path)-1] != '/' {
-		return path + "/"
-	}
-
-	return path
 }
 
 func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, error) {
@@ -86,7 +74,7 @@ func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, error) {
 	 * hardcoding that at the other end, so we can just ignore it.
 	 */
 	rsyncCmd := fmt.Sprintf("sh -c \"nc -U %s\"", f.Name())
-	cmd := exec.Command("rsync", "-arvPz", "--devices", "--partial", path, "localhost:/tmp/foo", "-e", rsyncCmd)
+	cmd := exec.Command("rsync", "-arvP", "--devices", "--partial", path, "localhost:/tmp/foo", "-e", rsyncCmd)
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
@@ -117,7 +105,7 @@ func RsyncSend(path string, conn *websocket.Conn) error {
 }
 
 func rsyncRecvCmd(path string) *exec.Cmd {
-	return exec.Command("rsync", "--server", "-vlogDtprze.iLsfx", "--devices", "--partial", ".", path)
+	return exec.Command("rsync", "--server", "-vlogDtpre.iLsfx", "--devices", "--partial", ".", path)
 }
 
 // RsyncRecv sets up the receiving half of the websocket to rsync (the other

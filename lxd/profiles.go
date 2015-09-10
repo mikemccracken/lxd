@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,25 +9,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/lxc/lxd/shared"
+
+	log "gopkg.in/inconshreveable/log15.v2"
 )
-
-func addProfileConfig(tx *sql.Tx, id int, config map[string]string) error {
-	str := fmt.Sprintf("INSERT INTO profiles_config (profile_id, key, value) VALUES(?, ?, ?)")
-	stmt, err := tx.Prepare(str)
-	defer stmt.Close()
-
-	for k, v := range config {
-		if !ValidContainerConfigKey(k) {
-			return fmt.Errorf("Bad key: %s\n", k)
-		}
-		_, err = stmt.Exec(id, k, v)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
 
 /* This is used for both profiles post and profile put */
 type profilesPostReq struct {
@@ -38,22 +21,36 @@ type profilesPostReq struct {
 }
 
 func profilesGet(d *Daemon, r *http.Request) Response {
-	q := fmt.Sprintf("SELECT name FROM profiles")
-	inargs := []interface{}{}
-	var name string
-	outfmt := []interface{}{name}
-	result, err := shared.DbQueryScan(d.db, q, inargs, outfmt)
+	results, err := dbProfilesGet(d.db)
 	if err != nil {
 		return SmartError(err)
 	}
-	response := []string{}
-	for _, r := range result {
-		name := r[0].(string)
-		url := fmt.Sprintf("/%s/profiles/%s", shared.APIVersion, name)
-		response = append(response, url)
+
+	recursion := d.isRecursionRequest(r)
+
+	resultString := make([]string, len(results))
+	resultMap := make([]*shared.ProfileConfig, len(results))
+	i := 0
+	for _, name := range results {
+		if !recursion {
+			url := fmt.Sprintf("/%s/profiles/%s", shared.APIVersion, name)
+			resultString[i] = url
+		} else {
+			profile, err := doProfileGet(d, name)
+			if err != nil {
+				shared.Log.Error("Failed to get profile", log.Ctx{"profile": name})
+				continue
+			}
+			resultMap[i] = profile
+		}
+		i++
 	}
 
-	return SyncResponse(true, response)
+	if !recursion {
+		return SyncResponse(true, resultString)
+	}
+
+	return SyncResponse(true, resultMap)
 }
 
 func profilesPost(d *Daemon, r *http.Request) Response {
@@ -66,87 +63,66 @@ func profilesPost(d *Daemon, r *http.Request) Response {
 		return BadRequest(fmt.Errorf("No name provided"))
 	}
 
-	name := req.Name
-
-	tx, err := shared.DbBegin(d.db)
+	_, err := dbProfileCreate(d.db, req.Name, req.Config, req.Devices)
 	if err != nil {
-		return InternalError(err)
-	}
-	result, err := tx.Exec("INSERT INTO profiles (name) VALUES (?)", name)
-	if err != nil {
-		tx.Rollback()
-		return SmartError(err)
-	}
-	id64, err := result.LastInsertId()
-	if err != nil {
-		tx.Rollback()
-		return InternalError(fmt.Errorf("Error inserting %s into database", name))
-	}
-	id := int(id64)
-
-	err = addProfileConfig(tx, id, req.Config)
-	if err != nil {
-		tx.Rollback()
-		return SmartError(err)
-	}
-
-	err = AddDevices(tx, "profile", id, req.Devices)
-	if err != nil {
-		tx.Rollback()
-		return SmartError(err)
-	}
-
-	err = shared.TxCommit(tx)
-	if err != nil {
-		return InternalError(err)
+		return InternalError(
+			fmt.Errorf("Error inserting %s into database: %s", req.Name, err))
 	}
 
 	return EmptySyncResponse
 }
 
-var profilesCmd = Command{name: "profiles", get: profilesGet, post: profilesPost}
+var profilesCmd = Command{
+	name: "profiles",
+	get:  profilesGet,
+	post: profilesPost}
+
+func doProfileGet(d *Daemon, name string) (*shared.ProfileConfig, error) {
+	config, err := dbProfileConfigGet(d.db, name)
+	if err != nil {
+		return nil, err
+	}
+
+	devices, err := dbDevicesGet(d.db, name, true)
+	if err != nil {
+		return nil, err
+	}
+
+	return &shared.ProfileConfig{
+		Name:    name,
+		Config:  config,
+		Devices: devices,
+	}, nil
+}
 
 func profileGet(d *Daemon, r *http.Request) Response {
 	name := mux.Vars(r)["name"]
 
-	config, err := dbGetProfileConfig(d.db, name)
+	resp, err := doProfileGet(d, name)
 	if err != nil {
 		return SmartError(err)
-	}
-
-	devices, err := dbGetDevices(d.db, name, true)
-	if err != nil {
-		return SmartError(err)
-	}
-
-	resp := &shared.ProfileConfig{
-		Name:    name,
-		Config:  config,
-		Devices: devices,
 	}
 
 	return SyncResponse(true, resp)
 }
 
-func dbClearProfileConfig(tx *sql.Tx, id int) error {
-	_, err := tx.Exec("DELETE FROM profiles_config WHERE profile_id=?", id)
+func getRunningContainersWithProfile(d *Daemon, profile string) []container {
+	results := []container{}
+
+	output, err := dbProfileContainersGet(d.db, profile)
 	if err != nil {
-		return err
+		return results
 	}
 
-	_, err = tx.Exec(`DELETE FROM profiles_devices_config WHERE id IN
-		(SELECT profiles_devices_config.id
-		 FROM profiles_devices_config JOIN profiles_devices
-		 ON profiles_devices_config.profile_device_id=profiles_devices.id
-		 WHERE profiles_devices.profile_id=?)`, id)
-	if err != nil {
-		return err
+	for _, name := range output {
+		c, err := containerLXDLoad(d, name)
+		if err != nil {
+			shared.Log.Error("Failed opening container", log.Ctx{"container": name})
+			continue
+		}
+		results = append(results, c)
 	}
-	_, err = tx.Exec("DELETE FROM profiles_devices WHERE profile_id=?", id)
-	if err != nil {
-		return err
-	}
-	return nil
+	return results
 }
 
 func profilePut(d *Daemon, r *http.Request) Response {
@@ -157,75 +133,59 @@ func profilePut(d *Daemon, r *http.Request) Response {
 		return BadRequest(err)
 	}
 
-	tx, err := shared.DbBegin(d.db)
+	preDevList, err := dbDevicesGet(d.db, name, true)
+	if err != nil {
+		return InternalError(err)
+	}
+	clist := getRunningContainersWithProfile(d, name)
+
+	id, err := dbProfileIDGet(d.db, name)
+	if err != nil {
+		return InternalError(fmt.Errorf("Failed to retrieve profile='%s'", name))
+	}
+
+	tx, err := dbBegin(d.db)
 	if err != nil {
 		return InternalError(err)
 	}
 
-	rows, err := tx.Query("SELECT id FROM profiles WHERE name=?", name)
+	err = dbProfileConfigClear(tx, id)
+	if err != nil {
+		tx.Rollback()
+		return InternalError(err)
+	}
+
+	err = dbProfileConfigAdd(tx, id, req.Config)
 	if err != nil {
 		tx.Rollback()
 		return SmartError(err)
 	}
-	var id int
-	for rows.Next() {
-		var i int
-		err = rows.Scan(&i)
-		if err != nil {
-			shared.Debugf("DBERR: profilePut: scan returned error %q\n", err)
-			tx.Rollback()
-			return InternalError(err)
+
+	err = dbDevicesAdd(tx, "profile", id, req.Devices)
+	if err != nil {
+		tx.Rollback()
+		return SmartError(err)
+	}
+
+	postDevList := req.Devices
+	// do our best to update the device list for each container using
+	// this profile
+	for _, c := range clist {
+		if !c.IsRunning() {
+			continue
 		}
-		id = i
-	}
-	rows.Close()
-	err = rows.Err()
-	if err != nil {
-		shared.Debugf("DBERR: profilePut: Err returned an error %q\n", err)
-		tx.Rollback()
-		return InternalError(err)
+		fmt.Printf("Updating profile device list for %s\n", c.NameGet())
+		if err := devicesApplyDeltaLive(tx, c, preDevList, postDevList); err != nil {
+			shared.Debugf("Warning: failed to update device list for container %s (profile %s updated)", c.NameGet(), name)
+		}
 	}
 
-	err = dbClearProfileConfig(tx, id)
-	if err != nil {
-		tx.Rollback()
-		return InternalError(err)
-	}
-
-	err = addProfileConfig(tx, id, req.Config)
-	if err != nil {
-		tx.Rollback()
-		return SmartError(err)
-	}
-
-	err = AddDevices(tx, "profile", id, req.Devices)
-	if err != nil {
-		tx.Rollback()
-		return SmartError(err)
-	}
-
-	err = shared.TxCommit(tx)
+	err = txCommit(tx)
 	if err != nil {
 		return InternalError(err)
 	}
 
 	return EmptySyncResponse
-}
-
-func dbProfileDelete(db *sql.DB, name string) error {
-	tx, err := shared.DbBegin(db)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec("DELETE FROM profiles WHERE name=?", name)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	err = shared.TxCommit(tx)
-
-	return err
 }
 
 // The handler for the delete operation.

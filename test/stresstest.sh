@@ -65,7 +65,7 @@ cleanup() {
     for p in `pidof lxd`; do
         pgrp=`awk '{ print $5 }' /proc/$p/stat`
         if [ "$pgrp" = "$mygrp" ]; then
-            kill -9 $p
+          do_kill_lxd $p
         fi
     done
 
@@ -95,7 +95,7 @@ spawn_lxd() {
   shift
   shift
   echo "==> Spawning lxd on $addr in $lxddir"
-  LXD_DIR=$lxddir lxd ${DEBUG} --tcp $addr $extraargs $* 2>&1 > $lxddir/lxd.log &
+  LXD_DIR=$lxddir lxd ${DEBUG} $extraargs $* 2>&1 > $lxddir/lxd.log &
 
   echo "==> Confirming lxd on $addr is responsive"
   alive=0
@@ -103,6 +103,9 @@ spawn_lxd() {
     [ -e "${lxddir}/unix.socket" ] && LXD_DIR=$lxddir lxc finger && alive=1
     sleep 1s
   done
+
+  echo "==> Binding to network"
+  LXD_DIR=$lxddir lxc config set core.https_address $addr
 
   echo "==> Setting trust password"
   LXD_DIR=$lxddir lxc config set core.trust_password foo
@@ -160,7 +163,7 @@ configthread() {
     echo "configthread: I am $$"
     for i in `seq 1 20`; do
         lxc profile create p$i
-        lxc profile set p$i limits.memory 100
+        lxc profile set p$i limits.memory 100M
         lxc profile delete p$i
     done
     exit 0
@@ -174,9 +177,9 @@ disturbthread() {
         lxc profile apply disturb1 empty
         lxc start disturb1
         lxc exec disturb1 -- ps -ef
-        lxc stop disturb1
+        lxc stop disturb1 --force
         lxc delete disturb1
-	lxc profile delete empty
+        lxc profile delete empty
     done
     exit 0
 }

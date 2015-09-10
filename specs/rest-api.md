@@ -66,8 +66,8 @@ wrong, in those cases, the following return value is used:
 
     {
         'type': "error",
-        'status': "Failure",
-        'status_code': 400,
+        'error': "Failure",
+        'error_code': 400,
         'metadata': {}                      # More details about the error
     }
 
@@ -104,6 +104,12 @@ Code  | Meaning
 103   | Running
 104   | Cancelling
 105   | Pending
+106   | Starting
+107   | Stopping
+108   | Aborting
+109   | Freezing
+110   | Frozen
+111   | Thawed
 200   | Success
 400   | Failure
 401   | Cancelled
@@ -147,6 +153,8 @@ they point to (typically a dict).
          * /1.0/containers/\<name\>/snapshots
          * /1.0/containers/\<name\>/snapshots/\<name\>
          * /1.0/containers/\<name\>/state
+         * /1.0/containers/\<name\>/logs
+         * /1.0/containers/\<name\>/logs/\<logfile\>
      * /1.0/events
      * /1.0/images
        * /1.0/images/\<fingerprint\>
@@ -183,11 +191,19 @@ Return value (if trusted):
         'auth': "trusted",                              # Authentication state, one of "guest", "untrusted" or "trusted"
         'api_compat': 0,                                # Used to determine API functionality
         'config': {"trust_password": True},             # Host configuration
-        'environment': {'kernel_version': "3.16",       # Various information about the host (OS, kernel, ...)
-                        'lxc_version': "1.0.6",
-                        'lxd_version': "0.8.1",
+        'environment': {                                # Various information about the host (OS, kernel, ...)
+                        'addresses': ["1.2.3.4:8443", "[1234::1234]:8443"],
+                        'architectures': [1, 2],
                         'driver': "lxc",
-                        'backing_fs': "ext4"}
+                        'driver_version': "1.0.6",
+                        'kernel': "Linux",
+                        'kernel_architecture': "x86_64",
+                        'kernel_version': "3.16",
+                        'storage': "btrfs",
+                        'storage_version': "3.19",
+                        'server': "lxd",
+                        'server_pid': 10224,
+                        'server_version': "0.8.1"}
     }
 
 Return value (if guest or untrusted):
@@ -226,8 +242,7 @@ Input (container based on a local image with the "ubuntu/devel" alias):
 
     {
         'name': "my-new-container",                                         # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                            # List of profiles
         'ephemeral': True,                                                  # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                     # Config override.
@@ -239,8 +254,7 @@ Input (container based on a local image identified by its fingerprint):
 
     {
         'name': "my-new-container",                                         # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                            # List of profiles
         'ephemeral': True,                                                  # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                     # Config override.
@@ -252,8 +266,7 @@ Input (container based on most recent match based on image properties):
 
     {
         'name': "my-new-container",                                         # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                            # List of profiles
         'ephemeral': True,                                                  # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                     # Config override.
@@ -269,8 +282,7 @@ Input (container without a pre-populated rootfs, useful when attaching to an exi
 
     {
         'name': "my-new-container",                                         # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                            # List of profiles
         'ephemeral': True,                                                  # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                     # Config override.
@@ -281,8 +293,7 @@ Input (using a public remote image):
 
     {
         'name': "my-new-container",                                         # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                            # List of profiles
         'ephemeral': True,                                                  # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                     # Config override.
@@ -297,8 +308,7 @@ Input (using a private remote image after having obtained a secret for that imag
 
     {
         'name': "my-new-container",                                         # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                            # List of profiles
         'ephemeral': True,                                                  # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                     # Config override.
@@ -313,8 +323,7 @@ Input (using a remote container, sent over the migration websocket):
 
     {
         'name': "my-new-container",                                                     # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                                        # List of profiles
         'ephemeral': True,                                                              # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                                 # Config override.
@@ -331,8 +340,7 @@ Input (using a local container):
 
     {
         'name': "my-new-container",                                                     # 64 chars max, ASCII, no slash, no colon and no comma
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'profiles': ["default"],                                                        # List of profiles
         'ephemeral': True,                                                              # Whether to destroy the container on shutdown
         'config': {'limits.cpus': "2"},                                                 # Config override.
@@ -341,29 +349,26 @@ Input (using a local container):
     }
 
 
-## /1.0/containers/\<name\>?log=true
+## /1.0/containers/\<name\>
 ### GET
  * Description: Container information
  * Authentication: trusted
  * Operation: sync
- * Return: dict of the container configuration and current state. If the
-   optional parameter log=true is supplied, the last 100 lines of the
-   container's log are rendered as well.
+ * Return: dict of the container configuration and current state.
 
 Output:
 
     {
         'name': "my-container",
         'profiles': ["default"],
-        'architecture': "x86_64",
-        'hostname': "my-container",
+        'architecture': 2,
         'config': {"limits.cpus": "3"},
         'expanded_config': {"limits.cpus": "3"}  # the result of expanding profiles and adding the container's local config
         'devices': {
             'rootfs': {
                 'type': "disk",
                 'path': "/",
-                'source': "UUID=8f7fdf5e-dc60-4524-b9fe-634f82ac2fb6"}
+                'source': "UUID=8f7fdf5e-dc60-4524-b9fe-634f82ac2fb6"
             }
         },
         'expanded_devices': {  # the result of expanding profiles and adding the container's local devices
@@ -371,22 +376,26 @@ Output:
                 'type': "disk",
                 'path': "/",
                 'source': "UUID=8f7fdf5e-dc60-4524-b9fe-634f82ac2fb6"}
+            },
+            "eth0": {
+                "type": "nic"
+                "parent": "lxcbr0",
+                "hwaddr": "00:16:3e:f4:e7:1c",
+                "name": "eth0",
+                "nictype": "bridged",
             }
         },
-        'userdata': "SOME BASE64 BLOB",
         'status': {
                     'status': "Running",
                     'status_code': 103,
                     'ips': [{'interface': "eth0",
                              'protocol': "INET6",
-                             'address': "2001:470:b368:1020:1::2"},
+                             'address': "2001:470:b368:1020:1::2",
+                             'host_veth': "vethGMDIY9"},
                             {'interface': "eth0",
                              'protocol': "INET",
-                             'address': "172.16.15.30"}]},
-        'log': "lxc-checkpoint 1430925874.468 DEBUG    lxc_commands - commands.c:lxc_cmd_get_state:574 - 'u2' is in 'RUNNING' state
-                lxc-checkpoint 1430925874.468 ERROR    lxc_criu - criu.c:criu_version_ok:242 - No such file or directory - execing criu failed, is it installed?
-                ...",
-
+                             'address': "172.16.15.30",
+                             'host_veth': "vethGMDIY9"}]},
     }
 
 
@@ -492,7 +501,8 @@ The following headers will be set (on top of standard size and mimetype headers)
  * X-LXD-gid: 0
  * X-LXD-mode: 0700
 
-This is designed to be easily usable from the command line or even a web browser.
+This is designed to be easily usable from the command line or even a web
+browser. This is only supported for currently running containers.
 
 ### POST
  * Description: upload a file to the container
@@ -508,7 +518,8 @@ The following headers may be set by the client:
  * X-LXD-gid: 0
  * X-LXD-mode: 0700
 
-This is designed to be easily usable from the command line or even a web browser.
+This is designed to be easily usable from the command line or even a web
+browser. This is only supported for currently running containers.
 
 ## /1.0/containers/\<name\>/snapshots
 ### GET
@@ -624,6 +635,34 @@ to these (i.e. you can only write to 0, and read from 1 and 2):
         "2": "secret2",
     }
 
+## /1.0/containers/\<name\>/logs
+### GET
+* Description: Returns a list of the log files available for this container.
+  Note that this works on containers that have been deleted (or were never
+  created) to enable people to get logs for failed creations.
+* Authentication: trusted
+* Operation: Sync
+* Return: a list of the available log files
+
+Return:
+
+    [
+        'lxc.log',
+        'migration_dump_2015-03-31T14:30:59Z.log'
+    ]
+
+## /1.0/containers/\<name\>/logs/\<logfile\>
+### GET
+* Description: returns the contents of a particular log file.
+* Authentication: trusted
+* Operation: N/A
+* Return: the contents of the log file
+
+### DELETE
+* Description: delete a particular log file.
+* Authentication: trusted
+* Operation: Sync
+* Return: empty response or standard error
 
 ## /1.0/events
 This URL isn't a real REST API endpoint, instead doing a GET query on it
@@ -646,14 +685,14 @@ The notification types are:
 This never returns. Each notification is sent as a separate JSON dict:
 
     {
-        'timestamp': 1415639996,                # Current timestamp
-        'type': "operations",                   # Notification type
-        'resource': "/1.0/operations/<uuid>",   # Resource URL
-        'metadata': {}                          # Extra resource or type specific metadata
+        'timestamp': "2015-06-09T19:07:24.379615253-06:00",                # Current timestamp
+        'type': "operations",                                              # Notification type
+        'resource': "/1.0/operations/<uuid>",                              # Resource URL
+        'metadata': {}                                                     # Extra resource or type specific metadata
     }
 
     {
-        'timestamp': 1415639996,
+        'timestamp': "2015-06-09T19:07:24.379615253-06:00",
         'type': "logging",
         'resource': "/1.0",
         'metadata' {'message': "Service started"}
@@ -678,7 +717,8 @@ query URL.
 
 Input (one of):
  * Standard http file upload
- * Soure container dictionary
+ * Source image dictionary (transfers a remote image)
+ * Source container dictionary (makes an image out of a local container)
 
 In the http file upload case, The following headers may be set by the client:
  * X-LXD-fingerprint: SHA-256 (if set, uploaded file must match)
@@ -686,15 +726,30 @@ In the http file upload case, The following headers may be set by the client:
  * X-LXD-public: true/false (defaults to false)
  * X-LXD-properties: URL-encoded key value pairs without duplicate keys (optional properties)
 
+In the source image case, the following dict must be passed:
+
+    {
+        "public": true,                         # True or False
+        "source": {
+            "type": "image",
+            "mode": "pull",                     # One of "pull" or "receive"
+            "server": "https://10.0.2.3:8443",  # Remote server (pull mode only)
+            "secret": "my-secret-string",       # Secret (pull mode only, private images only)
+            "fingerprint": "SHA256",            # Fingerprint of the image (must be set if alias isn't)
+            "alias": "ubuntu/devel",            # Name of the alias (must be set if fingerprint isn't)
+        }
+    }
+
 In the source container case, the following dict must be passed:
 
     {
-        "public": true,             # True or False
+        "public":   true,         # True or False
+        "filename": filename,     # Used for export
         "source": {
-            "type": "container",    # One of "container" or "snapshot"
+            "type": "container",  # One of "container" or "snapshot"
             "name": "abc"
         },
-        "properties": {             # Image properties
+        "properties": {           # Image properties
             "os": "Ubuntu",
         }
     }
@@ -715,7 +770,7 @@ Output:
 
     {
         'aliases': ['alias1', ...],
-        'architecture': 0,
+        'architecture': 2,
         'fingerprint': "a3625aeada09576673620d1d048eed7ac101c4c2409f527a1f77e237fa280e32",
         'filename': "busybox-amd64.tar.xz",
         'properties': {
@@ -723,9 +778,9 @@ Output:
         },
         'public': true,
         'size': 11031704,
-        'created_at': 1415639996,
-        'expires_at': 1415639996,
-        'uploaded_at': 1415639996
+        'created_at': "2015-06-09T19:07:24.379615253-06:00",
+        'expires_at': "2015-06-19T19:07:24.379615253-06:00",
+        'uploaded_at': "2015-06-09T19:07:24.379615253-06:00"
     }
 
 ### DELETE
@@ -921,15 +976,15 @@ Input (none at present):
 Return:
 
     {
-        'created_at': 1415639996,                   # Creation timestamp
-        'updated_at': 1415639996,                   # Last update timestamp
+        'created_at': "2015-06-09T19:07:24.379615253-06:00", # Creation timestamp
+        'updated_at': "2015-06-09T19:07:24.379615253-06:00", # Last update timestamp
         'status': "Running",
         'status_code': 103,
         'resources': {
-            'containers': ['/1.0/containers/1']     # List of affected resources
+            'containers': ['/1.0/containers/1']              # List of affected resources
         },
-        'metadata': {},                             # Extra information about the operation (action, target, ...)
-        'may_cancel': True                          # Whether it's possible to cancel the operation
+        'metadata': {},                                      # Extra information about the operation (action, target, ...)
+        'may_cancel': True                                   # Whether it's possible to cancel the operation
     }
 
 ### DELETE
@@ -1085,7 +1140,8 @@ Output:
 
     {
         'type': "client",
-        'certificate': "BASE64"
+        'certificate': "PEM certificate"
+        'fingerprint': "SHA256 Hash of the raw certificate"
     }
 
 ### DELETE

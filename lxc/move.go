@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
 	"github.com/lxc/lxd/shared"
@@ -19,7 +19,7 @@ func (c *moveCmd) usage() string {
 	return gettext.Gettext(
 		"Move containers within or in between lxd instances.\n" +
 			"\n" +
-			"lxc move <source container> <destination container>\n")
+			"lxc move [remote:]<source container> [remote:]<destination container>\n")
 }
 
 func (c *moveCmd) flags() {}
@@ -43,12 +43,18 @@ func (c *moveCmd) run(config *lxd.Config, args []string) error {
 			return err
 		}
 
-		status, err := source.ContainerStatus(sourceName, false)
-		if err != nil {
-			return err
+		canRename := false
+		if shared.IsSnapshot(sourceName) {
+			canRename = true
+		} else {
+			status, err := source.ContainerStatus(sourceName)
+			if err != nil {
+				return err
+			}
+			canRename = status.Status.StatusCode != shared.Running
 		}
 
-		if status.State() != shared.RUNNING {
+		if canRename {
 			rename, err := source.Rename(sourceName, destName)
 			if err != nil {
 				return err

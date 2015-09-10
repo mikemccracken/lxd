@@ -8,7 +8,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 	"golang.org/x/crypto/ssh/terminal"
 	"gopkg.in/yaml.v2"
 
@@ -179,7 +179,8 @@ func doProfileEdit(client *lxd.Client, p string) error {
 	defer os.Remove(fname)
 
 	for {
-		cmd := exec.Command(editor, fname)
+		cmdParts := strings.Fields(editor)
+		cmd := exec.Command(cmdParts[0], append(cmdParts[1:], fname)...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

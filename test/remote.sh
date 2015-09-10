@@ -13,7 +13,7 @@ test_remote_url() {
   for url in localhost:18443 https://localhost:18443; do
     (echo y;  sleep 3;  echo foo) | lxc remote add test $url
     lxc finger test:
-    lxc config trust list | while IFS= read -r line ; do
+    lxc config trust list | grep @ | awk '{print $2}' | while read line ; do
       lxc config trust remove "\"$line\""
     done
     lxc remote remove test
@@ -66,7 +66,7 @@ test_remote_admin() {
 
   # now re-add under a different alias
   lxc config trust add "$LXD_CONF/client2.crt"
-  if [ "$(lxc config trust list | wc -l)" -ne 2 ]; then
+  if [ "$(lxc config trust list | wc -l)" -ne 6 ]; then
     echo "wrong number of certs"
   fi
 
@@ -111,6 +111,16 @@ test_remote_usage() {
 
   lxc image alias create localhost:testimage $sum
 
+  # Double launch to test if the image downloads only once.
+  lxc init localhost:testimage lxd2:c1 &
+  C1PID=$!
+
+  lxc init localhost:testimage lxd2:c2
+  lxc delete lxd2:c2
+
+  wait $C1PID
+  lxc delete lxd2:c1
+
   if [ -n "$TRAVIS_PULL_REQUEST" ]; then
     return
   fi
@@ -119,7 +129,7 @@ test_remote_usage() {
   lxc launch localhost:testimage lxd2:c1
 
   # make sure it is running
-  lxc list lxd2: | grep c1 | grep RUNNING
+  lxc list lxd2: | grep c1 | grep Running
   lxc info lxd2:c1
   lxc stop lxd2:c1 --force
   lxc delete lxd2:c1

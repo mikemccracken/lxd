@@ -3,14 +3,29 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 	"github.com/olekukonko/tablewriter"
 
 	"github.com/lxc/lxd"
 	"github.com/lxc/lxd/shared"
 )
+
+type ByName [][]string
+
+func (a ByName) Len() int {
+	return len(a)
+}
+
+func (a ByName) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
+}
+
+func (a ByName) Less(i, j int) bool {
+	return a[i][0] < a[j][0]
+}
 
 type listCmd struct{}
 
@@ -97,13 +112,13 @@ func listContainers(cinfos []shared.ContainerInfo, filters []string, listsnaps b
 
 	for _, cinfo := range cinfos {
 		cstate := cinfo.State
-		d := []string{cstate.Name, cstate.Status.State}
+		d := []string{cstate.Name, cstate.Status.Status}
 
 		if !shouldShow(filters, &cstate) {
 			continue
 		}
 
-		if cstate.Status.State == "RUNNING" {
+		if cstate.Status.StatusCode == shared.Running {
 			ipv4s := []string{}
 			ipv6s := []string{}
 			for _, ip := range cstate.Status.Ips {
@@ -139,12 +154,9 @@ func listContainers(cinfos []shared.ContainerInfo, filters []string, listsnaps b
 
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"NAME", "STATE", "IPV4", "IPV6", "EPHEMERAL", "SNAPSHOTS"})
-
-	for _, v := range data {
-		table.Append(v)
-	}
-
-	table.Render() // Send output
+	sort.Sort(ByName(data))
+	table.AppendBulk(data)
+	table.Render()
 
 	if listsnaps && len(cinfos) == 1 {
 		csnaps := cinfos[0].Snaps

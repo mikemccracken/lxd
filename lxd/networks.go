@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 
@@ -15,8 +15,8 @@ import (
 )
 
 func networksGet(d *Daemon, r *http.Request) Response {
-	recursion_str := r.FormValue("recursion")
-	recursion, err := strconv.Atoi(recursion_str)
+	recursionStr := r.FormValue("recursion")
+	recursion, err := strconv.Atoi(recursionStr)
 	if err != nil {
 		recursion = 0
 	}
@@ -26,26 +26,26 @@ func networksGet(d *Daemon, r *http.Request) Response {
 		return InternalError(err)
 	}
 
-	result_string := make([]string, 0)
-	result_map := make([]network, 0)
+	resultString := []string{}
+	resultMap := []network{}
 	for _, iface := range ifs {
 		if recursion == 0 {
-			result_string = append(result_string, fmt.Sprintf("/%s/networks/%s", shared.APIVersion, iface.Name))
+			resultString = append(resultString, fmt.Sprintf("/%s/networks/%s", shared.APIVersion, iface.Name))
 		} else {
 			net, err := doNetworkGet(d, iface.Name)
 			if err != nil {
 				continue
 			}
-			result_map = append(result_map, net)
+			resultMap = append(resultMap, net)
 
 		}
 	}
 
 	if recursion == 0 {
-		return SyncResponse(true, result_string)
-	} else {
-		return SyncResponse(true, result_map)
+		return SyncResponse(true, resultString)
 	}
+
+	return SyncResponse(true, resultMap)
 }
 
 var networksCmd = Command{name: "networks", get: networksGet}
@@ -57,20 +57,21 @@ type network struct {
 }
 
 func children(iface string) []string {
-	p := path.Join(shared.SYS_CLASS_NET, iface, "brif")
+	p := path.Join("/sys/class/net", iface, "brif")
 
-	var ret []string
-
-	ents, err := ioutil.ReadDir(p)
-	if err != nil {
-		return ret
-	}
-
-	for _, ent := range ents {
-		ret = append(ret, ent.Name())
-	}
+	ret, _ := shared.ReadDir(p)
 
 	return ret
+}
+
+func isBridge(iface *net.Interface) bool {
+	p := path.Join("/sys/class/net", iface.Name, "bridge")
+	stat, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+
+	return stat.IsDir()
 }
 
 func isOnBridge(c *lxc.Container, bridge string) bool {
@@ -113,15 +114,20 @@ func doNetworkGet(d *Daemon, name string) (network, error) {
 
 	if shared.IsLoopback(iface) {
 		n.Type = "loopback"
-	} else if shared.IsBridge(iface) {
+	} else if isBridge(iface) {
 		n.Type = "bridge"
 		for _, ct := range lxc.ActiveContainerNames(d.lxcpath) {
-			c, err := newLxdContainer(ct, d)
+			c, err := containerLXDLoad(d, ct)
 			if err != nil {
 				return network{}, err
 			}
 
-			if isOnBridge(c.c, n.Name) {
+			lxContainer, err := c.LXContainerGet()
+			if err != nil {
+				return network{}, err
+			}
+
+			if isOnBridge(lxContainer, n.Name) {
 				n.Members = append(n.Members, ct)
 			}
 		}

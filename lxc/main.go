@@ -2,52 +2,57 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 func main() {
 	if err := run(); err != nil {
 		// The action we take depends on the error we get.
+		msg := fmt.Sprintf(gettext.Gettext("error: %v\n"), err)
 		switch t := err.(type) {
 		case *url.Error:
-			shared.Debugf("url.Error caught in main(). Op: %s, URL: %s, Err: %s\n", t.Op, t.URL, t.Err)
 			switch u := t.Err.(type) {
 			case *net.OpError:
-				shared.Debugf("Inner error type is a net.OpError: Op: %s Net: %s Addr: %s Err: %T", u.Op, u.Net, u.Addr, u.Err)
 				if u.Op == "dial" && u.Net == "unix" {
-					// The unix socket we are trying to conect to is refusing our connection attempt. Perhaps the server is not running?
-					// Let's at least tell the user about it, since it's hard to get information on wether something is actually listening.
-					fmt.Fprintf(os.Stderr, fmt.Sprintf(gettext.Gettext("Cannot connect to unix socket at %s Is the server running?\n"), u.Addr))
-					os.Exit(1)
+					switch errno := u.Err.(type) {
+					case syscall.Errno:
+						switch errno {
+						case syscall.ENOENT:
+							msg = gettext.Gettext("LXD socket not found; is LXD running?\n")
+						case syscall.ECONNREFUSED:
+							msg = gettext.Gettext("Connection refused; is LXD running?\n")
+						case syscall.EACCES:
+							msg = gettext.Gettext("Permisson denied, are you in the lxd group?\n")
+						default:
+							msg = fmt.Sprintf("%d %s\n", uintptr(errno), errno.Error())
+						}
+					}
 				}
-			default:
-				shared.Debugf("url.Error's inner Err type is %T", u)
 			}
-		default:
-			shared.Debugf("Error caught in main: %T\n", t)
 		}
 
-		fmt.Fprintf(os.Stderr, gettext.Gettext("error: %v\n"), err)
+		fmt.Fprintf(os.Stderr, msg)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	gettext.BindTextdomain("lxd", "")
+	gettext.BindTextdomain("lxd", "", nil)
 	gettext.Textdomain("lxd")
 
-	verbose := gnuflag.Bool("v", false, gettext.Gettext("Enables verbose mode."))
+	verbose := gnuflag.Bool("verbose", false, gettext.Gettext("Enables verbose mode."))
 	debug := gnuflag.Bool("debug", false, gettext.Gettext("Enables debug mode."))
+	forceLocal := gnuflag.Bool("force-local", false, gettext.Gettext("Enables debug mode."))
 
 	gnuflag.StringVar(&lxd.ConfigDir, "config", lxd.ConfigDir, gettext.Gettext("Alternate config directory."))
 
@@ -56,8 +61,13 @@ func run() error {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 	}
 
-	if len(os.Args) == 2 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+	if len(os.Args) >= 2 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
 		os.Args[1] = "help"
+	}
+
+	if len(os.Args) >= 2 && (os.Args[1] == "--all") {
+		os.Args[1] = "help"
+		os.Args = append(os.Args, "--all")
 	}
 
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
@@ -84,23 +94,24 @@ func run() error {
 	os.Args = os.Args[1:]
 	gnuflag.Parse(true)
 
-	if *verbose || *debug {
-		shared.SetLogger(log.New(os.Stderr, "", log.LstdFlags))
-		shared.SetDebug(*debug)
-	}
+	shared.SetLogger("", "", *verbose, *debug)
 
-	config, err := lxd.LoadConfig()
-	if err != nil {
-		return err
+	var config *lxd.Config
+	var err error
+
+	if *forceLocal {
+		config = &lxd.DefaultConfig
+	} else {
+		config, err = lxd.LoadConfig()
+		if err != nil {
+			return err
+		}
 	}
 
 	certf := lxd.ConfigPath("client.crt")
 	keyf := lxd.ConfigPath("client.key")
 
-	_, err = os.Stat(certf)
-	_, err2 := os.Stat(keyf)
-
-	if os.Args[0] != "help" && os.Args[0] != "version" && (err != nil || err2 != nil) {
+	if !*forceLocal && os.Args[0] != "help" && os.Args[0] != "version" && (!shared.PathExists(certf) || !shared.PathExists(keyf)) {
 		fmt.Fprintf(os.Stderr, gettext.Gettext("Generating a client certificate. This may take a minute...\n"))
 
 		err = shared.FindOrGenCert(certf, keyf)
@@ -109,7 +120,7 @@ func run() error {
 		}
 
 		fmt.Fprintf(os.Stderr, gettext.Gettext("If this is your first run, you will need to import images using the 'lxd-images' script.\n"))
-		fmt.Fprintf(os.Stderr, gettext.Gettext("For example: 'lxd-images import lxc ubuntu trusty amd64 --alias ubuntu/trusty'.\n"))
+		fmt.Fprintf(os.Stderr, gettext.Gettext("For example: 'lxd-images import ubuntu --alias ubuntu'.\n"))
 	}
 
 	err = cmd.run(config, gnuflag.Args())
@@ -142,6 +153,7 @@ var commands = map[string]command{
 	"list":     &listCmd{},
 	"move":     &moveCmd{},
 	"profile":  &profileCmd{},
+	"publish":  &publishCmd{},
 	"remote":   &remoteCmd{},
 	"restart":  &actionCmd{shared.Restart, true},
 	"restore":  &restoreCmd{},

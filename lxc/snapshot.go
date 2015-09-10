@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type snapshotCmd struct {
@@ -22,7 +22,7 @@ func (c *snapshotCmd) usage() string {
 	return gettext.Gettext(
 		"Create a read-only snapshot of a container.\n" +
 			"\n" +
-			"lxc snapshot <source> <snapshot name> [--stateful]\n")
+			"lxc snapshot [remote:]<source> <snapshot name> [--stateful]\n")
 }
 
 func (c *snapshotCmd) flags() {

@@ -111,7 +111,7 @@ Command                                                                         
 lxc config show                                                                 | Show the local server's configuration
 lxc config show dakara:                                                         | Show "dakara"'s server' configuration
 lxc config set core.trust\_password new-trust-password                          | Set the local server's trust password to "new-trust-password"
-lxc config set c1 limits.memory 2GB                                             | Set a memory limit of 2GB for container "c1"
+lxc config set c1 limits.memory 2G                                              | Set a memory limit of 2GB for container "c1"
 lxc config show c1                                                              | Show the configuration of the "c1" container, starting by the list of profiles it’s based on, then the container specific settings and finally the resulting overall configuration.
 lxc config trust add new-client-cert.crt                                        | Add new-client-cert.pem to the default remote's trust store (typically local LXD)
 lxc config trust add dakara: new-client-cert.crt                                | Add new-client-cert.pem to the "dakara"'s trust store
@@ -182,7 +182,7 @@ Execute a command inside the remote container.
 Command                                                 | Result
 :------                                                 | :-----
 lxc exec c1 -- /bin/bash                                   | Spawn /bin/bash in local container c1
-tar xcf - /opt/myapp \| lxc exec dakara:c2 -- tar xvf -    | Make a tarball of /opt/myapp with the stream going out to stdout, then have that piped into lxc exec connecting to a receiving tar command in container running on remote host "dakara"
+tar cf - /opt/myapp \| lxc exec dakara:c2 -- tar xvf -    | Make a tarball of /opt/myapp with the stream going out to stdout, then have that piped into lxc exec connecting to a receiving tar command in container running on remote host "dakara"
 
 * * *
 
@@ -194,7 +194,8 @@ tar xcf - /opt/myapp \| lxc exec dakara:c2 -- tar xvf -    | Make a tarball of /
     file pull <source> [<source>...] <target>
 
 **Description**
-Copies file to or from the container. Supports rewriting the uid/gid/mode.
+Copies file to or from the container. Supports rewriting the uid/gid/mode. This
+is only allowed for containers that are currently running.
 
 **Examples**
 
@@ -216,7 +217,7 @@ lxc file pull dakara:c2/etc/hosts /tmp/                 | Grab /etc/hosts from c
     image delete <image>
     image edit <image>
     image export <image> [target]
-    image import <tarball> [target] [--public] [--created-at=ISO-8601] [--expires-at=ISO-8601] [--fingerprint=FINGERPRINT] [--alias=ALIAS].. [prop=value]
+    image import <tarball> [rootfs tarball] [target] [--public] [--created-at=ISO-8601] [--expires-at=ISO-8601] [--fingerprint=FINGERPRINT] [--alias=ALIAS].. [prop=value]
     image info <image>
     image list [filter]
     image move <image> <remote:>
@@ -253,6 +254,7 @@ Command                                                                         
 :------                                                                                                                 | :-----
 lxc image import centos-7-x86\_64.tar.gz --created-at=2014-12-10 --expires-at=2015-01-10 os=fedora release=7 arch=amd64 | Import a centos LXD image in the local LXD image store
 lxc image import debian-jessie\_amd64.tar.gz dakara:                                                                    | Import a debian LXD image in the lxc image store of remote host "dakara"
+lxc image import debian-jessie\_amd64.meta.tar.gz debian-jessie\_amd64.tar.g dakara:                                    | Import a debian LXD image in split format in the lxc image store of remote host "dakara"
 lxc image alias create centos/7 \<fingerprint\>                                                                         | Create an alias for centos/7 pointing to our centos 7 image
 
 **Example output (lxc image list)**
@@ -471,7 +473,7 @@ local container still references it.
 Command                                                                  | Result
 :------                                                                  | :-----
 lxc profile create micro                                                 | Create a new "micro" profile.
-lxc profile set micro limits.memory 256MB                                | Restrict memory usage to 256MB
+lxc profile set micro limits.memory 256M                                 | Restrict memory usage to 256MB
 lxc profile set micro limits.cpus 1                                      | Restrict CPU usage to a single core
 lxc profile copy micro dakara:                                           | Copy the resulting profile over to "dakara"
 lxc profile show micro                                                   | Show all the options associated with the "micro" profile and all the containers using it
@@ -511,7 +513,7 @@ lxc publish c2 dakara: --public                 | Turn c2 into a public image on
 
 **Arguments**
 
-    add <name> <URI> [--always-relay] [--password=PASSWORD] [--accept-certificate]
+    add <name> <URI> [--always-relay] [--password=PASSWORD] [--accept-certificate] [--public]
     remove <name>
     list
     rename <old name> <new name>

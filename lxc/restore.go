@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type restoreCmd struct {
@@ -22,7 +22,7 @@ func (c *restoreCmd) usage() string {
 	return gettext.Gettext(
 		"Set the current state of a resource back to what it was when it was snapshotted.\n" +
 			"\n" +
-			"lxc restore <resource> <snapshot name> [--stateful]\n")
+			"lxc restore [remote:]<resource> <snapshot name> [--stateful]\n")
 }
 
 func (c *restoreCmd) flags() {

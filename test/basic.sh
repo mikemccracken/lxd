@@ -1,11 +1,17 @@
+gen_third_cert() {
+	[ -f $LXD_CONF/client3.crt ] && return
+	mv $LXD_CONF/client.crt $LXD_CONF/client.crt.bak
+	mv $LXD_CONF/client.key $LXD_CONF/client.key.bak
+	lxc list > /dev/null 2>&1
+	mv $LXD_CONF/client.crt $LXD_CONF/client3.crt
+	mv $LXD_CONF/client.key $LXD_CONF/client3.key
+	mv $LXD_CONF/client.crt.bak $LXD_CONF/client.crt
+	mv $LXD_CONF/client.key.bak $LXD_CONF/client.key
+}
+
 test_basic_usage() {
-  if ! lxc image alias list | grep -q "^| testimage\s*|.*$"; then
-    if [ -e "$LXD_TEST_IMAGE" ]; then
-        lxc image import $LXD_TEST_IMAGE --alias testimage
-    else
-        ../scripts/lxd-images import busybox --alias testimage
-    fi
-  fi
+  ensure_import_testimage
+  ensure_has_localhost_remote
 
   # Test image export
   sum=$(lxc image info testimage | grep ^Fingerprint | cut -d' ' -f2)
@@ -32,20 +38,60 @@ test_basic_usage() {
 
   # Test container creation
   lxc init testimage foo
-  lxc list | grep foo | grep STOPPED
-  lxc list fo | grep foo | grep STOPPED
+  lxc list | grep foo | grep Stopped
+  lxc list fo | grep foo | grep Stopped
 
   # Test container rename
   lxc move foo bar
+  lxc list | grep -v foo
+  lxc list | grep bar
 
   # Test container copy
   lxc copy bar foo
   lxc delete foo
+
+  # gen untrusted cert
+  gen_third_cert
+
+  # Test unprivileged container publish
+  lxc publish bar --alias=foo-image prop1=val1
+  lxc image show foo-image | grep val1
+  curl -k -s --cert $LXD_CONF/client3.crt --key $LXD_CONF/client3.key -X GET $BASEURL/1.0/images | grep "/1.0/images/" && false
+  lxc image delete foo-image
+
+  # Test privileged container publish
+  lxc profile create priv
+  lxc profile set priv security.privileged true
+  lxc init testimage barpriv -p default -p priv
+  lxc publish barpriv --alias=foo-image prop1=val1
+  lxc image show foo-image | grep val1
+  curl -k -s --cert $LXD_CONF/client3.crt --key $LXD_CONF/client3.key -X GET $BASEURL/1.0/images | grep "/1.0/images/" && false
+  lxc image delete foo-image
+  lxc delete barpriv
+  lxc profile delete priv
+
+  # Test public images
+  lxc publish --public bar --alias=foo-image2
+  curl -k -s --cert $LXD_CONF/client3.crt --key $LXD_CONF/client3.key -X GET $BASEURL/1.0/images | grep "/1.0/images/"
+  lxc image delete foo-image2
+
+  # Test snapshot publish
+  lxc snapshot bar
+  lxc publish bar/snap0 --alias foo
+  lxc init foo bar2
+  lxc list | grep bar2
+  lxc delete bar2
+  lxc image delete foo
+
+  # Delete the bar container we've used for several tests
   lxc delete bar
+
+  # lxc delete should also delete all snapshots of bar
+  [ ! -d ${LXD_DIR}/snapshots/bar ]
 
   # Test randomly named container creation
   lxc init testimage
-  RDNAME=$(lxc list | grep STOPPED | cut -d' ' -f2)
+  RDNAME=$(lxc list | grep Stopped | cut -d' ' -f2)
   lxc delete $RDNAME
 
   # Test "nonetype" container creation
@@ -66,13 +112,13 @@ test_basic_usage() {
 
   # Create and start a container
   lxc launch testimage foo
-  lxc list | grep foo | grep RUNNING
+  lxc list | grep foo | grep Running
   lxc stop foo --force  # stop is hanging
 
   # cycle it a few times
   lxc start foo
   mac1=$(lxc exec foo cat /sys/class/net/eth0/address)
-  lxc stop foo  --force # stop is hanging
+  lxc stop foo --force # stop is hanging
   lxc start foo
   mac2=$(lxc exec foo cat /sys/class/net/eth0/address)
 
@@ -108,11 +154,32 @@ test_basic_usage() {
   rm ${LXD_DIR}/out
 
   # This is why we can't have nice things.
-  content=$(cat "${LXD_DIR}/lxc/foo/rootfs/tmp/foo")
+  content=$(cat "${LXD_DIR}/containers/foo/rootfs/tmp/foo")
   [ "$content" = "foo" ]
 
   # cleanup
   lxc delete foo
+
+  # check that an apparmor profile is created for this container, that it is
+  # unloaded on stop, and that it is deleted when the container is deleted
+  lxc launch testimage lxd-apparmor-test
+  aa-status | grep lxd-apparmor-test
+  lxc stop lxd-apparmor-test --force
+  bad=0
+  aa-status | grep lxd-apparmor-test && bad=1 || true
+  if [ "$bad" -eq 1 ]; then
+    echo "apparmor profile wasn't unloaded on container stop" && false
+  fi
+  lxc delete lxd-apparmor-test
+  [ ! -f ${LXD_DIR}/security/apparmor/profiles/lxd-lxd-apparmor-test ]
+
+  # make sure that privileged containers are not world-readable
+  lxc profile create unconfined
+  lxc profile set unconfined security.privileged true
+  lxc init testimage foo2 -p unconfined
+  [ `stat -c "%a" ${LXD_DIR}/containers/foo2` = 700 ]
+  lxc delete foo2
+  lxc profile delete unconfined
 
   # Ephemeral
   lxc launch testimage foo -e

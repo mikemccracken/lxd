@@ -1,66 +1,50 @@
 package main
 
 import (
-	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"golang.org/x/crypto/scrypt"
 
 	"github.com/lxc/lxd/shared"
 )
 
-func (d *Daemon) hasPwd() bool {
-	q := "SELECT id FROM config WHERE key=\"core.trust_password\""
-	id := -1
-	argIn := []interface{}{}
-	argOut := []interface{}{&id}
-	err := shared.DbQueryRowScan(d.db, q, argIn, argOut)
-	return err == nil && id != -1
-}
-
-func (d *Daemon) verifyAdminPwd(password string) bool {
-	q := "SELECT value FROM config WHERE key=\"core.trust_password\""
-	value := ""
-	argIn := []interface{}{}
-	argOut := []interface{}{&value}
-	err := shared.DbQueryRowScan(d.db, q, argIn, argOut)
-
-	if err != nil || value == "" {
-		shared.Debugf("verifyAdminPwd: no password is set")
-		return false
-	}
-
-	buff, err := hex.DecodeString(value)
-	if err != nil {
-		shared.Debugf("hex decode failed")
-		return false
-	}
-
-	salt := buff[0:PW_SALT_BYTES]
-	hash, err := scrypt.Key([]byte(password), salt, 1<<14, 8, 1, PW_HASH_BYTES)
-	if err != nil {
-		shared.Debugf("failed to create hash to check")
-		return false
-	}
-	if !bytes.Equal(hash, buff[PW_SALT_BYTES:]) {
-		shared.Debugf("Bad password received")
-		return false
-	}
-	shared.Debugf("Verified the admin password")
-	return true
+func certGenerateFingerprint(cert *x509.Certificate) string {
+	return fmt.Sprintf("%x", sha256.Sum256(cert.Raw))
 }
 
 func certificatesGet(d *Daemon, r *http.Request) Response {
+	recursion := d.isRecursionRequest(r)
+
+	if recursion {
+		certResponses := []shared.CertInfo{}
+
+		baseCerts, err := dbCertsGet(d.db)
+		if err != nil {
+			return SmartError(err)
+		}
+		for _, baseCert := range baseCerts {
+			resp := shared.CertInfo{}
+			resp.Fingerprint = baseCert.Fingerprint
+			resp.Certificate = baseCert.Certificate
+			if baseCert.Type == 1 {
+				resp.Type = "client"
+			} else {
+				resp.Type = "unknown"
+			}
+			certResponses = append(certResponses, resp)
+		}
+		return SyncResponse(true, certResponses)
+	}
+
 	body := []string{}
 	for _, cert := range d.clientCerts {
-		fingerprint := shared.GenerateFingerprint(&cert)
+		fingerprint := certGenerateFingerprint(&cert)
 		body = append(body, fingerprint)
 	}
 
@@ -76,22 +60,18 @@ type certificatesPostBody struct {
 
 func readSavedClientCAList(d *Daemon) {
 	d.clientCerts = []x509.Certificate{}
-	rows, err := shared.DbQuery(d.db, "SELECT fingerprint, type, name, certificate FROM certificates")
+
+	dbCerts, err := dbCertsGet(d.db)
 	if err != nil {
-		shared.Logf("Error reading certificates from database: %s\n", err)
+		shared.Logf("Error reading certificates from database: %s", err)
 		return
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var fp string
-		var t int
-		var name string
-		var cf []byte
-		rows.Scan(&fp, &t, &name, &cf)
-		cert_block, _ := pem.Decode(cf)
-		cert, err := x509.ParseCertificate(cert_block.Bytes)
+
+	for _, dbCert := range dbCerts {
+		certBlock, _ := pem.Decode([]byte(dbCert.Certificate))
+		cert, err := x509.ParseCertificate(certBlock.Bytes)
 		if err != nil {
-			shared.Logf("Error reading certificate for %s: %s\n", name, err)
+			shared.Logf("Error reading certificate for %s: %s", dbCert.Name, err)
 			continue
 		}
 		d.clientCerts = append(d.clientCerts, *cert)
@@ -99,24 +79,16 @@ func readSavedClientCAList(d *Daemon) {
 }
 
 func saveCert(d *Daemon, host string, cert *x509.Certificate) error {
-	tx, err := shared.DbBegin(d.db)
-	if err != nil {
-		return err
-	}
-	fingerprint := shared.GenerateFingerprint(cert)
-	stmt, err := tx.Prepare("INSERT INTO certificates (fingerprint,type,name,certificate) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	defer stmt.Close()
-	_, err = stmt.Exec(fingerprint, 1, host, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}))
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
 
-	return shared.TxCommit(tx)
+	baseCert := new(dbCertInfo)
+	baseCert.Fingerprint = certGenerateFingerprint(cert)
+	baseCert.Type = 1
+	baseCert.Name = host
+	baseCert.Certificate = string(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}),
+	)
+
+	return dbCertSave(d.db, baseCert)
 }
 
 func certificatesPost(d *Daemon, r *http.Request) Response {
@@ -145,7 +117,7 @@ func certificatesPost(d *Daemon, r *http.Request) Response {
 		}
 		name = req.Name
 
-	} else {
+	} else if r.TLS != nil {
 
 		if len(r.TLS.PeerCertificates) < 1 {
 			return BadRequest(fmt.Errorf("No client certificate provided"))
@@ -158,16 +130,18 @@ func certificatesPost(d *Daemon, r *http.Request) Response {
 		}
 
 		name = remoteHost
+	} else {
+		return BadRequest(fmt.Errorf("Can't use TLS data on non-TLS link"))
 	}
 
-	fingerprint := shared.GenerateFingerprint(cert)
+	fingerprint := certGenerateFingerprint(cert)
 	for _, existingCert := range d.clientCerts {
-		if fingerprint == shared.GenerateFingerprint(&existingCert) {
+		if fingerprint == certGenerateFingerprint(&existingCert) {
 			return EmptySyncResponse
 		}
 	}
 
-	if !d.isTrustedClient(r) && !d.verifyAdminPwd(req.Password) {
+	if !d.isTrustedClient(r) && !d.PasswordCheck(req.Password) {
 		return Forbidden
 	}
 
@@ -181,37 +155,69 @@ func certificatesPost(d *Daemon, r *http.Request) Response {
 	return EmptySyncResponse
 }
 
-var certificatesCmd = Command{"certificates", false, true, certificatesGet, nil, certificatesPost, nil}
+var certificatesCmd = Command{
+	"certificates",
+	false,
+	true,
+	certificatesGet,
+	nil,
+	certificatesPost,
+	nil,
+}
 
 func certificateFingerprintGet(d *Daemon, r *http.Request) Response {
 	fingerprint := mux.Vars(r)["fingerprint"]
 
-	for _, cert := range d.clientCerts {
-		if fingerprint == shared.GenerateFingerprint(&cert) {
-			b64 := base64.StdEncoding.EncodeToString(cert.Raw)
-			body := shared.Jmap{"type": "client", "certificates": b64}
-			return SyncResponse(true, body)
-		}
+	cert, err := doCertificateGet(d, fingerprint)
+	if err != nil {
+		return SmartError(err)
 	}
 
-	return NotFound
+	return SyncResponse(true, cert)
+}
+
+func doCertificateGet(d *Daemon, fingerprint string) (shared.CertInfo, error) {
+	resp := shared.CertInfo{}
+
+	dbCertInfo, err := dbCertGet(d.db, fingerprint)
+	if err != nil {
+		return resp, err
+	}
+
+	resp.Fingerprint = dbCertInfo.Fingerprint
+	resp.Certificate = dbCertInfo.Certificate
+	if dbCertInfo.Type == 1 {
+		resp.Type = "client"
+	} else {
+		resp.Type = "unknown"
+	}
+
+	return resp, nil
 }
 
 func certificateFingerprintDelete(d *Daemon, r *http.Request) Response {
 	fingerprint := mux.Vars(r)["fingerprint"]
-	for i, cert := range d.clientCerts {
-		if fingerprint == shared.GenerateFingerprint(&cert) {
-			fingerprint := shared.GenerateFingerprint(&cert)
-			d.clientCerts = append(d.clientCerts[:i], d.clientCerts[i+1:]...)
-			_, err := shared.DbExec(d.db, "DELETE FROM certificates WHERE fingerprint=?", fingerprint)
-			if err != nil {
-				return SmartError(err)
-			}
-			return EmptySyncResponse
-		}
+
+	certInfo, err := dbCertGet(d.db, fingerprint)
+	if err != nil {
+		return NotFound
 	}
 
-	return NotFound
+	err = dbCertDelete(d.db, certInfo.Fingerprint)
+	if err != nil {
+		return SmartError(err)
+	}
+	readSavedClientCAList(d)
+
+	return EmptySyncResponse
 }
 
-var certificateFingerprintCmd = Command{"certificates/{fingerprint}", false, false, certificateFingerprintGet, nil, nil, certificateFingerprintDelete}
+var certificateFingerprintCmd = Command{
+	"certificates/{fingerprint}",
+	false,
+	false,
+	certificateFingerprintGet,
+	nil,
+	nil,
+	certificateFingerprintDelete,
+}

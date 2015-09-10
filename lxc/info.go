@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type infoCmd struct {
@@ -48,18 +49,24 @@ func (c *infoCmd) run(config *lxd.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	ct, err := d.ContainerStatus(cName, c.showLog)
+	ct, err := d.ContainerStatus(cName)
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("Name: %s\n", ct.Name)
-	fmt.Printf("Status: %s\n", ct.Status.State)
+	fmt.Printf("Status: %s\n", ct.Status.Status)
 	if ct.Status.Init != 0 {
 		fmt.Printf("Init: %d\n", ct.Status.Init)
 		fmt.Printf("Ips:\n")
 		foundone := false
 		for _, ip := range ct.Status.Ips {
-			fmt.Printf("  %s:\t %s\t%s\n", ip.Interface, ip.Protocol, ip.Address)
+			vethStr := ""
+			if ip.HostVeth != "" {
+				vethStr = fmt.Sprintf("\t%s", ip.HostVeth)
+			}
+
+			fmt.Printf("  %s:\t%s\t%s%s\n", ip.Interface, ip.Protocol, ip.Address, vethStr)
 			foundone = true
 		}
 		if !foundone {
@@ -82,7 +89,17 @@ func (c *infoCmd) run(config *lxd.Config, args []string) error {
 	}
 
 	if c.showLog {
-		fmt.Printf("\nLog:\n\n%s\n", ct.Log)
+		log, err := d.GetLog(cName, "lxc.log")
+		if err != nil {
+			return err
+		}
+
+		stuff, err := ioutil.ReadAll(log)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("\nLog:\n\n%s\n", string(stuff))
 	}
 
 	return nil

@@ -1,4 +1,9 @@
 test_commits_signed_off() {
+  # Skip the test when not running from a git repository
+  if ! git status; then
+    return
+  fi
+
   # Don't run this test if we're not in travis; we don't want to muck with
   # people's local repos.
   if [ -z "$TRAVIS_PULL_REQUEST" ]; then
@@ -11,4 +16,5 @@ test_commits_signed_off() {
     git show "$i" | grep -q 'Signed-off-by' || \
         ( echo "==> Commit without sign-off:" ; git show "$i" ; false )
   done
+  git remote remove lxc
 }

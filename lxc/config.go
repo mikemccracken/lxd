@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -8,7 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
+	"github.com/olekukonko/tablewriter"
 	"golang.org/x/crypto/ssh/terminal"
 	"gopkg.in/yaml.v2"
 
@@ -47,25 +50,30 @@ func (c *configCmd) usage() string {
 	return gettext.Gettext(
 		"Manage configuration.\n" +
 			"\n" +
-			"lxc config device add <container> <name> <type> [key=value]...\n" +
+			"lxc config device add <[remote:]container> <name> <type> [key=value]...\n" +
 			"               Add a device to a container\n" +
-			"lxc config device list <container>                     List devices for container\n" +
-			"lxc config device show <container>                     Show full device details for container\n" +
-			"lxc config device remove <container> <name>            Remove device from container\n" +
-			"lxc config edit <container>                            Edit container configuration in external editor\n" +
-			"lxc config get <container> key                         Get configuration key\n" +
-			"lxc config set <container> key [value]                 Set container configuration key\n" +
-			"lxc config show <container>                            Show container configuration\n" +
+			"lxc config device list [remote:]<container>            List devices for container\n" +
+			"lxc config device show [remote:]<container>            Show full device details for container\n" +
+			"lxc config device remove [remote:]<container> <name>   Remove device from container\n" +
+			"lxc config edit [remote:]<container>                   Edit container configuration in external editor\n" +
+			"lxc config get [remote:]<container> key                Get configuration key\n" +
+			"lxc config set [remote:]<container> key value          Set container configuration key\n" +
+			"lxc config unset [remote:]<container> key              Unset container configuration key\n" +
+			"lxc config set key value                               Set server configuration key\n" +
+			"lxc config unset key                                   Unset server configuration key\n" +
+			"lxc config show [remote:]<container>                   Show container configuration\n" +
 			"lxc config trust list [remote]                         List all trusted certs.\n" +
-			"lxc config trust add [remote] [certfile.crt]           Add certfile.crt to trusted hosts.\n" +
+			"lxc config trust add [remote] <certfile.crt>           Add certfile.crt to trusted hosts.\n" +
 			"lxc config trust remove [remote] [hostname|fingerprint]\n" +
 			"               Remove the cert from trusted hosts.\n" +
 			"\n" +
 			"Examples:\n" +
 			"To mount host's /share/c1 onto /opt in the container:\n" +
-			"\tlxc config device add container1 mntdir disk source=/share/c1 path=opt\n" +
+			"\tlxc config device add [remote:]container1 <device-name> disk source=/share/c1 path=opt\n" +
 			"To set an lxc config value:\n" +
-			"\tlxc config set <container> raw.lxc 'lxc.aa_allow_incomplete = 1'\n" +
+			"\tlxc config set [remote:]<container> raw.lxc 'lxc.aa_allow_incomplete = 1'\n" +
+			"To listen on IPv4 and IPv6 port 8443 (you can omit the 8443 its the default):\n" +
+			"\tlxc config set core.https_address [::]:8443\n" +
 			"To set the server trust password:\n" +
 			"\tlxc config set core.trust_password blah\n")
 }
@@ -86,11 +94,7 @@ func doSet(config *lxd.Config, args []string) error {
 
 	key := args[2]
 	value := args[3]
-	resp, err := d.SetContainerConfig(container, key, value)
-	if err != nil {
-		return err
-	}
-	return d.WaitForSuccess(resp.Operation)
+	return d.SetContainerConfig(container, key, value)
 }
 
 func (c *configCmd) run(config *lxd.Config, args []string) error {
@@ -101,19 +105,34 @@ func (c *configCmd) run(config *lxd.Config, args []string) error {
 	switch args[0] {
 
 	case "unset":
-		if len(args) < 3 {
+		if len(args) < 2 {
 			return errArgs
 		}
-		return doSet(config, append(args, ""))
+
+		// 2 args means we're unsetting a server key
+		if len(args) == 2 {
+			key := args[1]
+			c, err := lxd.NewClient(config, config.DefaultRemote)
+			if err != nil {
+				return err
+			}
+			_, err = c.SetServerConfig(key, "")
+			return err
+		}
+
+		// 3 args is a container config key
+		args = append(args, "")
+		return doSet(config, args)
 
 	case "set":
 		if len(args) < 3 {
 			return errArgs
 		}
 
+		// 3 args means we're setting a server key
 		if len(args) == 3 {
 			key := args[1]
-			c, err := lxd.NewClient(config, "")
+			c, err := lxd.NewClient(config, config.DefaultRemote)
 			if err != nil {
 				return err
 			}
@@ -121,6 +140,7 @@ func (c *configCmd) run(config *lxd.Config, args []string) error {
 			return err
 		}
 
+		// 4 args is a container config key
 		return doSet(config, args)
 
 	case "trust":
@@ -147,9 +167,29 @@ func (c *configCmd) run(config *lxd.Config, args []string) error {
 				return err
 			}
 
-			for _, fingerprint := range trust {
-				fmt.Println(fmt.Sprintf("%s", fingerprint))
+			data := [][]string{}
+			for _, cert := range trust {
+				fp := cert.Fingerprint[0:12]
+
+				certBlock, _ := pem.Decode([]byte(cert.Certificate))
+				cert, err := x509.ParseCertificate(certBlock.Bytes)
+				if err != nil {
+					return err
+				}
+
+				const layout = "Jan 2, 2006 at 3:04pm (MST)"
+				issue := cert.NotBefore.Format(layout)
+				expiry := cert.NotAfter.Format(layout)
+				data = append(data, []string{fp, cert.Subject.CommonName, issue, expiry})
 			}
+
+			table := tablewriter.NewWriter(os.Stdout)
+			table.SetHeader([]string{"FINGERPRINT", "COMMON NAME", "ISSUE DATE", "EXPIRY DATE"})
+
+			for _, v := range data {
+				table.Append(v)
+			}
+			table.Render()
 
 			return nil
 		case "add":
@@ -196,13 +236,10 @@ func (c *configCmd) run(config *lxd.Config, args []string) error {
 		}
 
 	case "show":
-		remote := ""
+		remote := config.DefaultRemote
 		container := ""
 		if len(args) > 1 {
 			remote, container = config.ParseRemoteAndContainer(args[1])
-			if container == "" {
-				return fmt.Errorf(gettext.Gettext("Show for remotes is not yet supported\n"))
-			}
 		}
 
 		d, err := lxd.NewClient(config, remote)
@@ -221,7 +258,7 @@ func (c *configCmd) run(config *lxd.Config, args []string) error {
 			brief := config.BriefState()
 			data, err = yaml.Marshal(&brief)
 		} else {
-			config, err := d.ContainerStatus(container, false)
+			config, err := d.ContainerStatus(container)
 			if err != nil {
 				return err
 			}
@@ -245,7 +282,7 @@ func (c *configCmd) run(config *lxd.Config, args []string) error {
 			return err
 		}
 
-		resp, err := d.ContainerStatus(container, false)
+		resp, err := d.ContainerStatus(container)
 		if err != nil {
 			return err
 		}
@@ -305,7 +342,7 @@ func doConfigEdit(client *lxd.Client, cont string) error {
 		return client.UpdateContainerConfig(cont, newdata)
 	}
 
-	config, err := client.ContainerStatus(cont, false)
+	config, err := client.ContainerStatus(cont)
 	if err != nil {
 		return err
 	}
@@ -336,7 +373,8 @@ func doConfigEdit(client *lxd.Client, cont string) error {
 	defer os.Remove(fname)
 
 	for {
-		cmd := exec.Command(editor, fname)
+		cmdParts := strings.Fields(editor)
+		cmd := exec.Command(cmdParts[0], append(cmdParts[1:], fname)...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -476,7 +514,7 @@ func deviceShow(config *lxd.Config, which string, args []string) error {
 		devices = resp.Devices
 
 	} else {
-		resp, err := client.ContainerStatus(name, false)
+		resp, err := client.ContainerStatus(name)
 		if err != nil {
 			return err
 		}

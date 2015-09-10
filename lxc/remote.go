@@ -5,19 +5,23 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
+	"strings"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
+	"github.com/olekukonko/tablewriter"
 	"golang.org/x/crypto/ssh/terminal"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type remoteCmd struct {
 	httpAddr   string
 	acceptCert bool
 	password   string
+	public     bool
 }
 
 func (c *remoteCmd) showByDefault() bool {
@@ -28,25 +32,27 @@ func (c *remoteCmd) usage() string {
 	return gettext.Gettext(
 		"Manage remote LXD servers.\n" +
 			"\n" +
-			"lxc remote add <name> <url> [--accept-certificate] [--password=PASSWORD]  Add the remote <name> at <url>.\n" +
-			"lxc remote remove <name>                                                  Remove the remote <name>.\n" +
-			"lxc remote list                                                           List all remotes.\n" +
-			"lxc remote rename <old> <new>                                             Rename remote <old> to <new>.\n" +
-			"lxc remote set-url <name> <url>                                           Update <name>'s url to <url>.\n" +
-			"lxc remote set-default <name>                                             Set the default remote.\n" +
-			"lxc remote get-default                                                    Print the default remote.\n")
+			"lxc remote add <name> <url> [--accept-certificate] [--password=PASSWORD] [--public]    Add the remote <name> at <url>.\n" +
+			"lxc remote remove <name>                                                               Remove the remote <name>.\n" +
+			"lxc remote list                                                                        List all remotes.\n" +
+			"lxc remote rename <old> <new>                                                          Rename remote <old> to <new>.\n" +
+			"lxc remote set-url <name> <url>                                                        Update <name>'s url to <url>.\n" +
+			"lxc remote set-default <name>                                                          Set the default remote.\n" +
+			"lxc remote get-default                                                                 Print the default remote.\n")
 }
 
 func (c *remoteCmd) flags() {
 	gnuflag.BoolVar(&c.acceptCert, "accept-certificate", false, gettext.Gettext("Accept certificate"))
 	gnuflag.StringVar(&c.password, "password", "", gettext.Gettext("Remote admin password"))
+	gnuflag.BoolVar(&c.public, "public", false, gettext.Gettext("Public image server"))
 }
 
-func addServer(config *lxd.Config, server string, addr string, acceptCert bool, password string) error {
+func addServer(config *lxd.Config, server string, addr string, acceptCert bool, password string, public bool) error {
 	var r_scheme string
 	var r_host string
 	var r_port string
 
+	/* Complex remote URL parsing */
 	remote_url, err := url.Parse(addr)
 	if err != nil {
 		return err
@@ -61,8 +67,7 @@ func addServer(config *lxd.Config, server string, addr string, acceptCert bool, 
 	} else if addr[0] == '/' {
 		r_scheme = "unix"
 	} else {
-		_, err := os.Stat(addr)
-		if err != nil && os.IsNotExist(err) {
+		if !shared.PathExists(addr) {
 			r_scheme = "https"
 		} else {
 			r_scheme = "unix"
@@ -80,7 +85,7 @@ func addServer(config *lxd.Config, server string, addr string, acceptCert bool, 
 		r_host = host
 		r_port = port
 	} else {
-		r_port = "8443"
+		r_port = shared.DefaultPort
 	}
 
 	if r_scheme == "unix" {
@@ -94,6 +99,10 @@ func addServer(config *lxd.Config, server string, addr string, acceptCert bool, 
 		r_port = ""
 	}
 
+	if strings.Contains(r_host, ":") && !strings.HasPrefix(r_host, "[") {
+		r_host = fmt.Sprintf("[%s]", r_host)
+	}
+
 	if r_port != "" {
 		addr = r_scheme + "://" + r_host + ":" + r_port
 	} else {
@@ -104,7 +113,8 @@ func addServer(config *lxd.Config, server string, addr string, acceptCert bool, 
 		config.Remotes = make(map[string]lxd.RemoteConfig)
 	}
 
-	config.Remotes[server] = lxd.RemoteConfig{Addr: addr}
+	/* Actually add the remote */
+	config.Remotes[server] = lxd.RemoteConfig{Addr: addr, Public: public}
 
 	remote := config.ParseRemote(server)
 	c, err := lxd.NewClient(config, remote)
@@ -121,6 +131,14 @@ func addServer(config *lxd.Config, server string, addr string, acceptCert bool, 
 	err = c.UserAuthServerCert(host, acceptCert)
 	if err != nil {
 		return err
+	}
+
+	if public {
+		if err := c.Finger(); err != nil {
+			return err
+		}
+
+		return nil
 	}
 
 	if c.AmTrusted() {
@@ -178,7 +196,7 @@ func (c *remoteCmd) run(config *lxd.Config, args []string) error {
 			return fmt.Errorf(gettext.Gettext("remote %s exists as <%s>"), args[1], rc.Addr)
 		}
 
-		err := addServer(config, args[1], args[2], c.acceptCert, c.password)
+		err := addServer(config, args[1], args[2], c.acceptCert, c.password, c.public)
 		if err != nil {
 			delete(config.Remotes, args[1])
 			return err
@@ -202,11 +220,21 @@ func (c *remoteCmd) run(config *lxd.Config, args []string) error {
 		removeCertificate(args[1])
 
 	case "list":
+		data := [][]string{}
 		for name, rc := range config.Remotes {
-			fmt.Println(fmt.Sprintf("%s <%s>", name, rc.Addr))
+			if rc.Public {
+				data = append(data, []string{name, rc.Addr, "YES"})
+			} else {
+				data = append(data, []string{name, rc.Addr, "NO"})
+			}
 		}
-		/* Here, we don't need to save since we didn't actually modify
-		 * anything, so just return. */
+
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{"NAME", "URL", "PUBLIC"})
+		sort.Sort(ByName(data))
+		table.AppendBulk(data)
+		table.Render()
+
 		return nil
 
 	case "rename":
@@ -245,9 +273,11 @@ func (c *remoteCmd) run(config *lxd.Config, args []string) error {
 			return errArgs
 		}
 
-		_, ok := config.Remotes[args[1]]
-		if !ok {
-			return fmt.Errorf(gettext.Gettext("remote %s doesn't exist"), args[1])
+		if args[1] != "" {
+			_, ok := config.Remotes[args[1]]
+			if !ok {
+				return fmt.Errorf(gettext.Gettext("remote %s doesn't exist"), args[1])
+			}
 		}
 		config.DefaultRemote = args[1]
 

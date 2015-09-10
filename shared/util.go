@@ -1,168 +1,109 @@
-// +build linux
-// +build cgo
-
 package shared
 
 import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
-
-	"github.com/gorilla/websocket"
-	"github.com/gosexy/gettext"
 )
 
-// #cgo LDFLAGS: -lutil -lpthread
-/*
-#include <unistd.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <grp.h>
-#include <pty.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <string.h>
-#include <stdio.h>
+const SnapshotDelimiter = "/"
+const DefaultPort = "8443"
 
-// This is an adaption from https://codereview.appspot.com/4589049, to be
-// included in the stdlib with the stdlib's license.
+func GetFileStat(p string) (uid int, gid int, major int, minor int,
+	inode uint64, nlink int, err error) {
+	var stat syscall.Stat_t
+	err = syscall.Lstat(p, &stat)
+	if err != nil {
+		return
+	}
+	uid = int(stat.Uid)
+	gid = int(stat.Gid)
+	inode = uint64(stat.Ino)
+	nlink = int(stat.Nlink)
+	major = -1
+	minor = -1
+	if stat.Mode&syscall.S_IFBLK != 0 || stat.Mode&syscall.S_IFCHR != 0 {
+		major = int(stat.Rdev / 256)
+		minor = int(stat.Rdev % 256)
+	}
 
-static int mygetgrgid_r(int gid, struct group *grp,
-	char *buf, size_t buflen, struct group **result) {
-	return getgrgid_r(gid, grp, buf, buflen, result);
+	return
 }
 
-void configure_pty(int fd) {
-	struct termios term_settings;
-	struct winsize win;
-
-	if (tcgetattr(fd, &term_settings) < 0) {
-		printf("Failed to get settings: %s\n", strerror(errno));
-		return;
+// AddSlash adds a slash to the end of paths if they don't already have one.
+// This can be useful for rsyncing things, since rsync has behavior present on
+// the presence or absence of a trailing slash.
+func AddSlash(path string) string {
+	if path[len(path)-1] != '/' {
+		return path + "/"
 	}
 
-	term_settings.c_iflag |= IMAXBEL;
-	term_settings.c_iflag |= IUTF8;
-	term_settings.c_iflag |= BRKINT;
-	term_settings.c_iflag |= IXANY;
-
-	term_settings.c_cflag |= HUPCL;
-
-	if (tcsetattr(fd, TCSANOW, &term_settings) < 0) {
-		printf("Failed to set settings: %s\n", strerror(errno));
-		return;
-	}
-
-	if (ioctl(fd, TIOCGWINSZ, &win) < 0) {
-		printf("Failed to get the terminal size: %s\n", strerror(errno));
-		return;
-	}
-
-	win.ws_col = 80;
-	win.ws_row = 25;
-
-	if (ioctl(fd, TIOCSWINSZ, &win) < 0) {
-		printf("Failed to set the terminal size: %s\n", strerror(errno));
-		return;
-	}
-
-	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-		printf("Failed to set FD_CLOEXEC: %s\n", strerror(errno));
-		return;
-	}
-
-	return;
+	return path
 }
 
-void create_pty(int *master, int *slave, int uid, int gid) {
-	if (openpty(master, slave, NULL, NULL, NULL) < 0) {
-		printf("Failed to openpty: %s\n", strerror(errno));
-		return;
+func PathExists(name string) bool {
+	_, err := os.Lstat(name)
+	if err != nil && os.IsNotExist(err) {
+		return false
 	}
-
-	configure_pty(*master);
-	configure_pty(*slave);
-
-	if (fchown(*slave, uid, gid) < 0) {
-		printf("Warning: error chowning pty to container root\n");
-		printf("Continuing...\n");
-	}
-	if (fchown(*master, uid, gid) < 0) {
-		printf("Warning: error chowning pty to container root\n");
-		printf("Continuing...\n");
-	}
+	return true
 }
 
-void create_pipe(int *master, int *slave) {
-	int pipefd[2];
-
-	if (pipe2(pipefd, O_CLOEXEC) < 0) {
-		printf("Failed to create a pipe: %s\n", strerror(errno));
-		return;
+// PathIsEmpty checks if the given path is empty.
+func PathIsEmpty(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
 	}
+	defer f.Close()
 
-	*master = pipefd[0];
-	*slave = pipefd[1];
+	// read in ONLY one file
+	_, err = f.Readdir(1)
+
+	// and if the file is EOF... well, the dir is empty.
+	if err == io.EOF {
+		return true, nil
+	}
+	return false, err
 }
 
-*/
-import "C"
-
-const (
-	SYS_CLASS_NET = "/sys/class/net"
-)
-
-func OpenPty(uid, gid int) (master *os.File, slave *os.File, err error) {
-	fd_master := C.int(-1)
-	fd_slave := C.int(-1)
-	rootUid := C.int(uid)
-	rootGid := C.int(gid)
-
-	C.create_pty(&fd_master, &fd_slave, rootUid, rootGid)
-
-	if fd_master == -1 || fd_slave == -1 {
-		return nil, nil, errors.New("Failed to create a new pts pair")
+// IsDir returns true if the given path is a directory.
+func IsDir(name string) bool {
+	stat, err := os.Lstat(name)
+	if err != nil {
+		return false
 	}
-
-	master = os.NewFile(uintptr(fd_master), "master")
-	slave = os.NewFile(uintptr(fd_slave), "slave")
-
-	return master, slave, nil
+	return stat.IsDir()
 }
 
-func Pipe() (master *os.File, slave *os.File, err error) {
-	fd_master := C.int(-1)
-	fd_slave := C.int(-1)
-
-	C.create_pipe(&fd_master, &fd_slave)
-
-	if fd_master == -1 || fd_slave == -1 {
-		return nil, nil, errors.New("Failed to create a new pipe")
+func IsMountPoint(name string) bool {
+	stat, err := os.Stat(name)
+	if err != nil {
+		return false
 	}
 
-	master = os.NewFile(uintptr(fd_master), "master")
-	slave = os.NewFile(uintptr(fd_slave), "slave")
-
-	return master, slave, nil
+	rootStat, err := os.Lstat(name + "/..")
+	if err != nil {
+		return false
+	}
+	// If the directory has the same device as parent, then it's not a mountpoint.
+	return stat.Sys().(*syscall.Stat_t).Dev != rootStat.Sys().(*syscall.Stat_t).Dev
 }
 
 // VarPath returns the provided path elements joined by a slash and
@@ -172,6 +113,7 @@ func VarPath(path ...string) string {
 	if varDir == "" {
 		varDir = "/var/lib/lxd"
 	}
+
 	items := []string{varDir}
 	items = append(items, path...)
 	return filepath.Join(items...)
@@ -190,31 +132,29 @@ func LogPath(path ...string) string {
 	return filepath.Join(items...)
 }
 
-func ParseLXDFileHeaders(headers http.Header) (uid int, gid int, mode os.FileMode, err error) {
-
-	uid, err = strconv.Atoi(headers.Get("X-LXD-uid"))
+func ParseLXDFileHeaders(headers http.Header) (uid int, gid int, mode os.FileMode) {
+	uid, err := strconv.Atoi(headers.Get("X-LXD-uid"))
 	if err != nil {
-		return 0, 0, 0, err
+		uid = 0
 	}
 
 	gid, err = strconv.Atoi(headers.Get("X-LXD-gid"))
 	if err != nil {
-		return 0, 0, 0, err
+		gid = 0
 	}
 
 	/* Allow people to send stuff with a leading 0 for octal or a regular
 	 * int that represents the perms when redered in octal. */
 	rawMode, err := strconv.ParseInt(headers.Get("X-LXD-mode"), 0, 0)
 	if err != nil {
-		return 0, 0, 0, err
+		rawMode = 0644
 	}
 	mode = os.FileMode(rawMode)
 
-	return uid, gid, mode, nil
+	return uid, gid, mode
 }
 
 func ReadToJSON(r io.Reader, req interface{}) error {
-
 	buf, err := ioutil.ReadAll(r)
 	if err != nil {
 		return err
@@ -223,12 +163,7 @@ func ReadToJSON(r io.Reader, req interface{}) error {
 	return json.Unmarshal(buf, req)
 }
 
-func GenerateFingerprint(cert *x509.Certificate) string {
-	return fmt.Sprintf("% x", sha256.Sum256(cert.Raw))
-}
-
 func ReaderToChannel(r io.Reader) <-chan []byte {
-
 	ch := make(chan ([]byte))
 
 	go func() {
@@ -250,142 +185,6 @@ func ReaderToChannel(r io.Reader) <-chan []byte {
 	return ch
 }
 
-func WebsocketSendStream(conn *websocket.Conn, r io.Reader) chan bool {
-	ch := make(chan bool)
-
-	go func(conn *websocket.Conn, r io.Reader) {
-		in := ReaderToChannel(r)
-		for {
-			buf, ok := <-in
-			if !ok {
-				break
-			}
-
-			w, err := conn.NextWriter(websocket.BinaryMessage)
-			if err != nil {
-				Debugf("got error getting next writer %s", err)
-				break
-			}
-
-			_, err = w.Write(buf)
-			w.Close()
-			if err != nil {
-				Debugf("got err writing %s", err)
-				break
-			}
-		}
-		closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-		conn.WriteMessage(websocket.CloseMessage, closeMsg)
-		ch <- true
-	}(conn, r)
-
-	return ch
-}
-
-func WebsocketRecvStream(w io.WriteCloser, conn *websocket.Conn) chan bool {
-	ch := make(chan bool)
-
-	go func(w io.WriteCloser, conn *websocket.Conn) {
-		for {
-			mt, r, err := conn.NextReader()
-			if mt == websocket.CloseMessage {
-				Debugf("got close message for reader")
-				break
-			}
-
-			if err != nil {
-				Debugf("got error getting next reader %s, %s", err, w)
-				break
-			}
-
-			buf, err := ioutil.ReadAll(r)
-			if err != nil {
-				Debugf("got error writing to writer %s", err)
-				break
-			}
-
-			i, err := w.Write(buf)
-			if i != len(buf) {
-				Debugf("didn't write all of buf")
-				break
-			}
-			if err != nil {
-				Debugf("error writing buf %s", err)
-				break
-			}
-		}
-		ch <- true
-	}(w, conn)
-
-	return ch
-}
-
-// WebsocketMirror allows mirroring a reader to a websocket and taking the
-// result and writing it to a writer.
-func WebsocketMirror(conn *websocket.Conn, w io.WriteCloser, r io.Reader) chan bool {
-	done := make(chan bool, 2)
-	go func(conn *websocket.Conn, w io.WriteCloser) {
-		for {
-			mt, r, err := conn.NextReader()
-			if mt == websocket.CloseMessage {
-				Debugf("got close message for reader")
-				break
-			}
-
-			if err != nil {
-				Debugf("got error getting next reader %s, %s", err, w)
-				break
-			}
-			buf, err := ioutil.ReadAll(r)
-			if err != nil {
-				Debugf("got error writing to writer %s", err)
-				break
-			}
-			i, err := w.Write(buf)
-			if i != len(buf) {
-				Debugf("didn't write all of buf")
-				break
-			}
-			if err != nil {
-				Debugf("error writing buf %s", err)
-				break
-			}
-		}
-		done <- true
-		w.Close()
-	}(conn, w)
-
-	go func(conn *websocket.Conn, r io.Reader) {
-		in := ReaderToChannel(r)
-		for {
-			buf, ok := <-in
-			if !ok {
-				done <- true
-				conn.WriteMessage(websocket.CloseMessage, []byte{})
-				conn.Close()
-				return
-			}
-			w, err := conn.NextWriter(websocket.BinaryMessage)
-			if err != nil {
-				Debugf("got error getting next writer %s", err)
-				break
-			}
-
-			_, err = w.Write(buf)
-			w.Close()
-			if err != nil {
-				Debugf("got err writing %s", err)
-				break
-			}
-		}
-		closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-		conn.WriteMessage(websocket.CloseMessage, closeMsg)
-		done <- true
-	}(conn, r)
-
-	return done
-}
-
 // Returns a random base64 encoded string from crypto/rand.
 func RandomCryptoString() (string, error) {
 	buf := make([]byte, 32)
@@ -399,16 +198,6 @@ func RandomCryptoString() (string, error) {
 	}
 
 	return hex.EncodeToString(buf), nil
-}
-
-func ReadCert(fpath string) (*x509.Certificate, error) {
-	cf, err := ioutil.ReadFile(fpath)
-	if err != nil {
-		return nil, err
-	}
-
-	certBlock, _ := pem.Decode(cf)
-	return x509.ParseCertificate(certBlock.Bytes)
 }
 
 func SplitExt(fpath string) (string, string) {
@@ -425,70 +214,6 @@ func AtoiEmptyDefault(s string, def int) (int, error) {
 	return strconv.Atoi(s)
 }
 
-// GroupName is an adaption from https://codereview.appspot.com/4589049.
-func GroupName(gid int) (string, error) {
-	var grp C.struct_group
-	var result *C.struct_group
-
-	bufSize := C.size_t(C.sysconf(C._SC_GETGR_R_SIZE_MAX))
-	buf := C.malloc(bufSize)
-	if buf == nil {
-		return "", fmt.Errorf(gettext.Gettext("allocation failed"))
-	}
-	defer C.free(buf)
-
-	// mygetgrgid_r is a wrapper around getgrgid_r to
-	// to avoid using gid_t because C.gid_t(gid) for
-	// unknown reasons doesn't work on linux.
-	rv := C.mygetgrgid_r(C.int(gid),
-		&grp,
-		(*C.char)(buf),
-		bufSize,
-		&result)
-
-	if rv != 0 {
-		return "", fmt.Errorf(gettext.Gettext("failed group lookup: %s"), syscall.Errno(rv))
-	}
-
-	if result == nil {
-		return "", fmt.Errorf(gettext.Gettext("unknown group %s"), gid)
-	}
-
-	return C.GoString(result.gr_name), nil
-}
-
-// GroupId is an adaption from https://codereview.appspot.com/4589049.
-func GroupId(name string) (int, error) {
-	var grp C.struct_group
-	var result *C.struct_group
-
-	bufSize := C.size_t(C.sysconf(C._SC_GETGR_R_SIZE_MAX))
-	buf := C.malloc(bufSize)
-	if buf == nil {
-		return -1, fmt.Errorf(gettext.Gettext("allocation failed"))
-	}
-	defer C.free(buf)
-
-	// mygetgrgid_r is a wrapper around getgrgid_r to
-	// to avoid using gid_t because C.gid_t(gid) for
-	// unknown reasons doesn't work on linux.
-	rv := C.getgrnam_r(C.CString(name),
-		&grp,
-		(*C.char)(buf),
-		bufSize,
-		&result)
-
-	if rv != 0 {
-		return -1, fmt.Errorf(gettext.Gettext("failed group lookup: %s"), syscall.Errno(rv))
-	}
-
-	if result == nil {
-		return -1, fmt.Errorf(gettext.Gettext("unknown group %s"), name)
-	}
-
-	return int(C.int(result.gr_gid)), nil
-}
-
 func ReadStdin() ([]byte, error) {
 	buf := bufio.NewReader(os.Stdin)
 	line, _, err := buf.ReadLine()
@@ -496,22 +221,6 @@ func ReadStdin() ([]byte, error) {
 		return nil, err
 	}
 	return line, nil
-}
-
-func PathExists(name string) bool {
-	_, err := os.Lstat(name)
-	if err != nil && os.IsNotExist(err) {
-		return false
-	}
-	return true
-}
-
-func IsDir(name string) bool {
-	stat, err := os.Lstat(name)
-	if err != nil {
-		return false
-	}
-	return stat.IsDir()
 }
 
 func GetTLSConfig(certf string, keyf string) (*tls.Config, error) {
@@ -556,8 +265,24 @@ func WriteAllBuf(w io.Writer, buf *bytes.Buffer) error {
 	}
 }
 
-// CopyFile copies a file, overwriting the target if it exists.
-func CopyFile(dest string, source string) error {
+// FileMove tries to move a file by using os.Rename,
+// if that fails it tries to copy the file and remove the source.
+func FileMove(oldPath string, newPath string) error {
+	if err := os.Rename(oldPath, newPath); err == nil {
+		return nil
+	}
+
+	if err := FileCopy(oldPath, newPath); err != nil {
+		return err
+	}
+
+	os.Remove(oldPath)
+
+	return nil
+}
+
+// FileCopy copies a file, overwriting the target if it exists.
+func FileCopy(source string, dest string) error {
 	s, err := os.Open(source)
 	if err != nil {
 		return err
@@ -581,38 +306,6 @@ func CopyFile(dest string, source string) error {
 	return err
 }
 
-/* Some interesting filesystems */
-const (
-	tmpfsSuperMagic = 0x01021994
-	ext4SuperMagic  = 0xEF53
-	xfsSuperMagic   = 0x58465342
-	nfsSuperMagic   = 0x6969
-)
-
-func GetFilesystem(path string) (string, error) {
-	fs := syscall.Statfs_t{}
-
-	err := syscall.Statfs(path, &fs)
-	if err != nil {
-		return "", err
-	}
-
-	switch fs.Type {
-	case btrfsSuperMagic:
-		return "btrfs", nil
-	case tmpfsSuperMagic:
-		return "tmpfs", nil
-	case ext4SuperMagic:
-		return "ext4", nil
-	case xfsSuperMagic:
-		return "xfs", nil
-	case nfsSuperMagic:
-		return "nfs", nil
-	default:
-		return string(fs.Type), nil
-	}
-}
-
 type BytesReadCloser struct {
 	Buf *bytes.Buffer
 }
@@ -627,7 +320,7 @@ func (r BytesReadCloser) Close() error {
 }
 
 func IsSnapshot(name string) bool {
-	return strings.Contains(name, "/")
+	return strings.Contains(name, SnapshotDelimiter)
 }
 
 func ReadLastNLines(f *os.File, lines int) (string, error) {
@@ -659,20 +352,6 @@ func ReadLastNLines(f *os.File, lines int) (string, error) {
 	return string(data), nil
 }
 
-func IsBridge(iface *net.Interface) bool {
-	p := path.Join(SYS_CLASS_NET, iface.Name, "bridge")
-	stat, err := os.Stat(p)
-	if err != nil {
-		return false
-	}
-
-	return stat.IsDir()
-}
-
-func IsLoopback(iface *net.Interface) bool {
-	return int(iface.Flags&net.FlagLoopback) > 0
-}
-
 func SetSize(fd int, width int, height int) (err error) {
 	var dimensions [4]uint16
 	dimensions[0] = uint16(height)
@@ -681,5 +360,187 @@ func SetSize(fd int, width int, height int) (err error) {
 	if _, _, err := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.TIOCSWINSZ), uintptr(unsafe.Pointer(&dimensions)), 0, 0, 0); err != 0 {
 		return err
 	}
+	return nil
+}
+
+func ReadDir(p string) ([]string, error) {
+	ents, err := ioutil.ReadDir(p)
+	if err != nil {
+		return []string{}, err
+	}
+
+	var ret []string
+	for _, ent := range ents {
+		ret = append(ret, ent.Name())
+	}
+	return ret, nil
+}
+
+func MkdirAllOwner(path string, perm os.FileMode, uid int, gid int) error {
+	// This function is a slightly modified version of MkdirAll from the Go standard library.
+	// https://golang.org/src/os/path.go?s=488:535#L9
+
+	// Fast path: if we can tell whether path is a directory or file, stop with success or error.
+	dir, err := os.Stat(path)
+	if err == nil {
+		if dir.IsDir() {
+			return nil
+		}
+		return fmt.Errorf("path exists but isn't a directory")
+	}
+
+	// Slow path: make sure parent exists and then call Mkdir for path.
+	i := len(path)
+	for i > 0 && os.IsPathSeparator(path[i-1]) { // Skip trailing path separator.
+		i--
+	}
+
+	j := i
+	for j > 0 && !os.IsPathSeparator(path[j-1]) { // Scan backward over element.
+		j--
+	}
+
+	if j > 1 {
+		// Create parent
+		err = MkdirAllOwner(path[0:j-1], perm, uid, gid)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Parent now exists; invoke Mkdir and use its result.
+	err = os.Mkdir(path, perm)
+
+	err_chown := os.Chown(path, uid, gid)
+	if err_chown != nil {
+		return err_chown
+	}
+
+	if err != nil {
+		// Handle arguments like "foo/." by
+		// double-checking that directory doesn't exist.
+		dir, err1 := os.Lstat(path)
+		if err1 == nil && dir.IsDir() {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func StringInSlice(key string, list []string) bool {
+	for _, entry := range list {
+		if entry == key {
+			return true
+		}
+	}
+	return false
+}
+
+func IntInSlice(key int, list []int) bool {
+	for _, entry := range list {
+		if entry == key {
+			return true
+		}
+	}
+	return false
+}
+
+/*
+ * returns 1 if path is mounted shared:
+ * returns 0 if path is not listed
+ * returns -1 if path is explicitly mounted as not-shared
+ */
+func isSharedMount(file *os.File, pathName string) int {
+	_, err := file.Seek(0, 0)
+	if err != nil {
+		Debugf("Error rewinding mountinfo file: %s\n", err)
+		return 0
+	}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		rows := strings.Fields(line)
+		if !strings.HasSuffix(pathName, rows[3]) || rows[4] != pathName {
+			continue
+		}
+		if strings.HasPrefix(rows[6], "shared:") {
+			return 1
+		} else {
+			return -1
+		}
+	}
+	return 0
+}
+
+func IsSharedMount(pathName string) bool {
+	file, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	switch isSharedMount(file, pathName) {
+	case 1:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsOnSharedMount(pathName string) bool {
+	file, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	for {
+		switch isSharedMount(file, pathName) {
+		case 1:
+			return true
+		case -1:
+			return false
+		}
+		if pathName == "/" || pathName == "." {
+			return false
+		}
+		pathName = filepath.Dir(pathName)
+	}
+}
+
+func IsBlockdev(fm os.FileMode) bool {
+	return ((fm&os.ModeDevice != 0) && (fm&os.ModeCharDevice == 0))
+}
+
+func IsBlockdevPath(pathName string) bool {
+	sb, err := os.Stat(pathName)
+	if err != nil {
+		return false
+	}
+
+	fm := sb.Mode()
+	return ((fm&os.ModeDevice != 0) && (fm&os.ModeCharDevice == 0))
+}
+
+func BlockFsDetect(dev string) (string, error) {
+	out, err := exec.Command("blkid", "-s", "TYPE", "-o", "value", dev).Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// DeepCopy copies src to dest by using encoding/gob so its not that fast.
+func DeepCopy(src, dest interface{}) error {
+
+	buff := new(bytes.Buffer)
+	enc := gob.NewEncoder(buff)
+	dec := gob.NewDecoder(buff)
+	if err := enc.Encode(src); err != nil {
+		return err
+	}
+
+	if err := dec.Decode(dest); err != nil {
+		return err
+	}
+
 	return nil
 }

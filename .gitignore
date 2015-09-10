@@ -3,3 +3,9 @@ po/*.mo
 po/*.po~
 lxd-*.tar.gz
 .vagrant
+test/devlxd-client
+*~
+
+# For Atom ctags
+.tags
+.tags1

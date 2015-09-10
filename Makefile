@@ -12,7 +12,17 @@ ARCHIVE=lxd-$(VERSION).tar
 
 .PHONY: default
 default:
+	-go get -t -v -d ./...
+	-go get -t -v -d ./...
 	go install -v ./...
+	@echo "LXD built succesfuly"
+
+.PHONY: client
+client:
+	-go get -t -v -d ./...
+	-go get -t -v -d ./...
+	go install -v ./lxc
+	@echo "LXD client built succesfuly"
 
 # This only needs to be done when migrate.proto is actually changed; since we
 # commit the .pb.go in the tree and it's not expected to change very often,
@@ -26,11 +36,16 @@ check: default
 	go test ./...
 	cd test && ./main.sh
 
+gccgo:
+	go build -compiler gccgo ./...
+	@echo "LXD built succesfuly with gccgo"
+
 .PHONY: dist
 dist:
 	rm -Rf lxd-$(VERSION) $(ARCHIVE) $(ARCHIVE).gz
 	mkdir -p lxd-$(VERSION)/dist
-	GOPATH=$(shell pwd)/lxd-$(VERSION)/dist go get -d -v ./...
+	-GOPATH=$(shell pwd)/lxd-$(VERSION)/dist go get -t -v -d ./...
+	GOPATH=$(shell pwd)/lxd-$(VERSION)/dist go get -t -v -d ./...
 	rm -rf $(shell pwd)/lxd-$(VERSION)/dist/src/github.com/lxc/lxd
 	ln -s ../../../.. ./lxd-$(VERSION)/dist/src/github.com/lxc/lxd
 	git archive --prefix=lxd-$(VERSION)/ --output=$(ARCHIVE) HEAD
@@ -59,3 +74,6 @@ build-mo: $(MOFILES)
 
 static-analysis:
 	/bin/bash -x -c ". test/static_analysis.sh; static_analysis"
+
+tags:
+	find . | grep \.go | grep -v git | grep -v .swp | grep -v vagrant | xargs gotags > tags

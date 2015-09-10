@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type launchCmd struct{}
@@ -21,7 +21,7 @@ func (c *launchCmd) usage() string {
 	return gettext.Gettext(
 		"Launch a container from a particular image.\n" +
 			"\n" +
-			"lxc launch <image> [<name>] [--ephemeral|-e] [--profile|-p <profile>...]\n" +
+			"lxc launch [remote:]<image> [remote:][<name>] [--ephemeral|-e] [--profile|-p <profile>...]\n" +
 			"\n" +
 			"Launches a container using the specified image and name.\n" +
 			"\n" +
@@ -41,7 +41,6 @@ func (c *launchCmd) flags() {
 }
 
 func (c *launchCmd) run(config *lxd.Config, args []string) error {
-
 	if len(args) > 2 || len(args) < 1 {
 		return errArgs
 	}
@@ -57,7 +56,6 @@ func (c *launchCmd) run(config *lxd.Config, args []string) error {
 		remote = ""
 	}
 
-	fmt.Printf("Creating container...")
 	d, err := lxd.NewClient(config, remote)
 	if err != nil {
 		return err
@@ -106,20 +104,25 @@ func (c *launchCmd) run(config *lxd.Config, args []string) error {
 			return fmt.Errorf(gettext.Gettext("got bad version"))
 		}
 	}
+	fmt.Printf("Creating %s ", name)
 
 	if err = d.WaitForSuccess(resp.Operation); err != nil {
 		return err
 	}
-	fmt.Println("done")
+	fmt.Println("done.")
 
-	fmt.Printf("Starting container...")
+	fmt.Printf("Starting %s ", name)
 	resp, err = d.Action(name, shared.Start, -1, false)
 	if err != nil {
 		return err
 	}
 
 	err = d.WaitForSuccess(resp.Operation)
-	fmt.Println("done")
+	if err != nil {
+		fmt.Println("error.")
+	} else {
+		fmt.Println("done.")
+	}
 
 	return err
 }

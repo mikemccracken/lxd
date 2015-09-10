@@ -6,11 +6,11 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 	"golang.org/x/crypto/ssh/terminal"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type execCmd struct{}
@@ -23,7 +23,7 @@ func (c *execCmd) usage() string {
 	return gettext.Gettext(
 		"Execute the specified command in a container.\n" +
 			"\n" +
-			"lxc exec container [--env EDITOR=/usr/bin/vim]... <command>\n")
+			"lxc exec [remote:]container [--env EDITOR=/usr/bin/vim]... <command>\n")
 }
 
 type envFlag []string

@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 
-	"github.com/gosexy/gettext"
+	"github.com/chai2010/gettext-go/gettext"
 
 	"github.com/lxc/lxd"
-	"github.com/lxc/lxd/internal/gnuflag"
+	"github.com/lxc/lxd/shared/gnuflag"
 )
 
 type initCmd struct{}
@@ -18,7 +19,9 @@ func (c *initCmd) showByDefault() bool {
 
 func (c *initCmd) usage() string {
 	return gettext.Gettext(
-		"lxc init <image> [<name>] [--ephemeral|-e] [--profile|-p <profile>...]\n" +
+		"Initialize a container from a particular image.\n" +
+			"\n" +
+			"lxc init [remote:]<image> [remote:][<name>] [--ephemeral|-e] [--profile|-p <profile>...]\n" +
 			"\n" +
 			"Initializes a container using the specified image and name.\n" +
 			"\n" +
@@ -135,7 +138,11 @@ func (c *initCmd) run(config *lxd.Config, args []string) error {
 	}
 
 	var resp *lxd.Response
-
+	if name == "" {
+		fmt.Printf("Creating ")
+	} else {
+		fmt.Printf("Creating %s ", name)
+	}
 	if !requested_empty_profiles && len(profiles) == 0 {
 		resp, err = d.Init(name, iremote, image, nil, ephem)
 	} else {
@@ -146,5 +153,19 @@ func (c *initCmd) run(config *lxd.Config, args []string) error {
 		return err
 	}
 
-	return d.WaitForSuccess(resp.Operation)
+	err = d.WaitForSuccess(resp.Operation)
+	if err != nil {
+		fmt.Println("error.")
+		return err
+	} else {
+		containers := resp.Resources["containers"]
+
+		if len(containers) == 1 && name == "" {
+			cname := path.Base(containers[0])
+			fmt.Println(cname, "done.")
+		} else {
+			fmt.Println("done.")
+		}
+	}
+	return nil
 }
