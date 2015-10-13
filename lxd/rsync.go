@@ -23,12 +23,27 @@ func rsyncWebsocket(cmd *exec.Cmd, conn *websocket.Conn) error {
 		return err
 	}
 
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
 	shared.WebsocketMirror(conn, stdin, stdout)
-	return cmd.Wait()
+	err = cmd.Wait()
+	if err != nil {
+		data, err2 := ioutil.ReadAll(stderr)
+		if err2 != nil {
+			shared.Debugf("error reading rsync stderr: %s", err)
+		} else {
+			shared.Debugf("rsync recv error %s: %s", err, string(data))
+		}
+	}
+
+	return err
 }
 
 func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, error) {
@@ -101,7 +116,12 @@ func RsyncSend(path string, conn *websocket.Conn) error {
 
 	shared.WebsocketMirror(conn, dataSocket, dataSocket)
 
-	return cmd.Wait()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		shared.Debugf("problem with rsync send %s: %s", err, string(output))
+	}
+
+	return err
 }
 
 func rsyncRecvCmd(path string) *exec.Cmd {
