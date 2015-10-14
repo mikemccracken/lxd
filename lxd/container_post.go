@@ -27,6 +27,8 @@ func containerPost(d *Daemon, r *http.Request) Response {
 	}
 
 	if body.Migration {
+		c.StorageStart()
+		defer c.StorageStop()
 		ws, err := NewMigrationSource(c)
 		if err != nil {
 			return InternalError(err)
