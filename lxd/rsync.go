@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"os"
@@ -48,14 +49,14 @@ func rsyncWebsocket(cmd *exec.Cmd, conn *websocket.Conn) error {
 	return err
 }
 
-func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, error) {
+func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, io.ReadCloser, error) {
 	/*
 	 * It's sort of unfortunate, but there's no library call to get a
 	 * temporary name, so we get the file and close it and use its name.
 	 */
 	f, err := ioutil.TempFile("", "lxd_rsync_")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	f.Close()
 	os.Remove(f.Name())
@@ -76,7 +77,7 @@ func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, error) {
 	 */
 	l, err := net.Listen("unix", f.Name())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	/*
@@ -92,23 +93,29 @@ func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, error) {
 	 */
 	rsyncCmd := fmt.Sprintf("sh -c \"nc -U %s\"", f.Name())
 	cmd := exec.Command("rsync", "-arvP", "--devices", "--msgs2stderr", "--info=ALL",  "--debug=ALL", "--partial", path, "localhost:/tmp/foo", "-e", rsyncCmd)
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	if err := cmd.Start(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	conn, err := l.Accept()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	l.Close()
 
-	return cmd, conn, nil
+	return cmd, conn, stderr, nil
 }
 
 // RsyncSend sets up the sending half of an rsync, to recursively send the
 // directory pointed to by path over the websocket.
 func RsyncSend(path string, conn *websocket.Conn) error {
-	cmd, dataSocket, err := rsyncSendSetup(path)
+	cmd, dataSocket, stderr, err := rsyncSendSetup(path)
 	if dataSocket != nil {
 		defer dataSocket.Close()
 	}
@@ -118,8 +125,12 @@ func RsyncSend(path string, conn *websocket.Conn) error {
 
 	shared.WebsocketMirror(conn, dataSocket, dataSocket)
 
-	output, err := cmd.CombinedOutput()
+	output, err := ioutil.ReadAll(stderr)
 	if err != nil {
+		shared.Debugf("problem reading rsync stderr %s", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
 		shared.Debugf("problem with rsync send %s: %s", err, string(output))
 	}
 
