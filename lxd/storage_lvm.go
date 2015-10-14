@@ -16,7 +16,7 @@ import (
 
 var sysSyncfsTrapNum uintptr = 306
 
-var storageLvmDefaultThinLVSize = "100GiB"
+var storageLvmDefaultThinLVSize = "1GiB"
 var storageLvmDefaultThinPoolName = "LXDPool"
 
 func storageLVMCheckVolumeGroup(vgName string) error {

@@ -33,14 +33,16 @@ func rsyncWebsocket(cmd *exec.Cmd, conn *websocket.Conn) error {
 	}
 
 	shared.WebsocketMirror(conn, stdin, stdout)
+	data, err2 := ioutil.ReadAll(stderr)
+	if err2 != nil {
+		shared.Debugf("error reading rsync stderr: %s", err2)
+		return err2
+	}
+	shared.Debugf("Stderr from rsync: %s", data)
+
 	err = cmd.Wait()
 	if err != nil {
-		data, err2 := ioutil.ReadAll(stderr)
-		if err2 != nil {
-			shared.Debugf("error reading rsync stderr: %s", err)
-		} else {
-			shared.Debugf("rsync recv error %s: %s", err, string(data))
-		}
+		shared.Debugf("rsync recv error %s: %s", err, string(data))
 	}
 
 	return err
@@ -89,7 +91,7 @@ func rsyncSendSetup(path string) (*exec.Cmd, net.Conn, error) {
 	 * hardcoding that at the other end, so we can just ignore it.
 	 */
 	rsyncCmd := fmt.Sprintf("sh -c \"nc -U %s\"", f.Name())
-	cmd := exec.Command("rsync", "-arvP", "--devices", "--partial", path, "localhost:/tmp/foo", "-e", rsyncCmd)
+	cmd := exec.Command("rsync", "-arvP", "--devices", "--msgs2stderr", "--info=ALL",  "--debug=ALL", "--partial", path, "localhost:/tmp/foo", "-e", rsyncCmd)
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
@@ -125,7 +127,7 @@ func RsyncSend(path string, conn *websocket.Conn) error {
 }
 
 func rsyncRecvCmd(path string) *exec.Cmd {
-	return exec.Command("rsync", "--server", "-vlogDtpre.iLsfx", "--devices", "--partial", ".", path)
+	return exec.Command("rsync", "--server", "-vlogDtpre.iLsfx", "--msgs2stderr", "--info=ALL",  "--debug=ALL", "--devices", "--partial", ".", path)
 }
 
 // RsyncRecv sets up the receiving half of the websocket to rsync (the other
